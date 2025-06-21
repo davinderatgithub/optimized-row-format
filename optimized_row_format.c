@@ -1,7 +1,9 @@
 #include "postgres.h"
 #include "access/tableam.h"
+#include "access/hio.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "access/tupmacs.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "utils/rel.h"
@@ -32,7 +34,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#include "optimized_storage.h"
+#include "optimized_row_format.h"
 
 PG_MODULE_MAGIC;
 
@@ -114,28 +116,21 @@ PG_MODULE_MAGIC;
  * - Physical layout: [1,2,NULL,'hello']
  */
 
-/* Optimized tuple header structure */
-typedef struct OptimizedTupleHeaderData
-{
-    uint32      t_len;          /* total length of tuple */
-    uint16      t_infomask;     /* various flag bits */
-    uint16      t_infomask2;    /* number of attributes + flags */
-    uint8       t_hoff;         /* offset to user data */
-    bits8       t_bits[FLEXIBLE_ARRAY_MEMBER]; /* null bitmap */
-    /* Variable-length column offsets array follows the null bitmap */
-    uint32      var_col_offsets[FLEXIBLE_ARRAY_MEMBER]; /* offsets to variable-length columns */
-} OptimizedTupleHeaderData;
-
-typedef OptimizedTupleHeaderData *OptimizedTupleHeader;
-
-#define SizeofOptimizedTupleHeader offsetof(OptimizedTupleHeaderData, t_bits)
 
 /* Forward declarations */
 static const TableAmRoutine optimized_tableam;
 
+/* Get the heap AM routine to delegate operations to */
+static const TableAmRoutine *
+get_heap_am_routine(void)
+{
+    return GetHeapamTableAmRoutine();
+}
+
 /* Function declarations */
-static void optimized_scan_begin(TableScanDesc scan, ScanKey keys, int nkeys,
-                               ScanKey orderbys, int norderbys);
+static TableScanDesc optimized_scan_begin(Relation rel, Snapshot snapshot,
+                                        int nkeys, struct ScanKeyData *key,
+                                        ParallelTableScanDesc pscan, uint32 flags);
 static void optimized_scan_end(TableScanDesc scan);
 static bool optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                                      TupleTableSlot *slot);
@@ -144,80 +139,107 @@ static Datum optimized_getattr(HeapTuple tuple, int attnum,
 static void optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                                  CommandId cid, int options, struct BulkInsertStateData *bistate);
 static void optimized_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
-                                             CommandId cid, int options, struct BulkInsertStateData *bistate);
+                                             CommandId cid, int options, struct BulkInsertStateData *bistate,
+                                             uint32 specToken);
 static void optimized_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
                                                uint32 specToken, bool succeeded);
 
 /* Table AM handler function */
-PG_FUNCTION_INFO_V1(optimized_storage_tableam_handler);
+PG_FUNCTION_INFO_V1(optimized_row_format_tableam_handler);
 
 /* Table access method handler */
 static const TableAmRoutine optimized_tableam = {
     .type = T_TableAmRoutine,
+
+    /* Slot related callbacks */
+    .slot_callbacks = NULL,  /* Use heap's slot callbacks */
+
+    /* Scan related callbacks */
     .scan_begin = optimized_scan_begin,
     .scan_end = optimized_scan_end,
+    .scan_rescan = NULL,  /* Use heap's rescan */
     .scan_getnextslot = optimized_scan_getnextslot,
-    .getattr = optimized_getattr,
+
+    /* Keep only the fully implemented functions */
+    //.getattr = optimized_getattr,
     .tuple_insert = optimized_tuple_insert,
-    .tuple_insert_speculative = optimized_tuple_insert_speculative,
-    .tuple_complete_speculative = optimized_tuple_complete_speculative,
+
+    /* Delegate the rest to heap AM by setting to NULL */
+    .tuple_insert_speculative = NULL,
+    .tuple_complete_speculative = NULL,
+    .multi_insert = NULL,
+    .tuple_delete = NULL,
+    .tuple_update = NULL,
+    .tuple_lock = NULL,
+    .relation_size = NULL,
+    .relation_needs_toast_table = NULL,
+    .relation_toast_am = NULL,
+    .relation_fetch_toast_slice = NULL,
+    .relation_estimate_size = NULL,
+    .scan_bitmap_next_block = NULL,
+    .scan_bitmap_next_tuple = NULL,
+    .scan_sample_next_block = NULL,
+    .scan_sample_next_tuple = NULL
 };
 
 /* Table AM handler function */
 Datum
-optimized_storage_tableam_handler(PG_FUNCTION_ARGS)
+optimized_row_format_tableam_handler(PG_FUNCTION_ARGS)
 {
     PG_RETURN_POINTER(&optimized_tableam);
 }
 
 /* Scan implementation */
-static void
-optimized_scan_begin(TableScanDesc scan, ScanKey keys, int nkeys,
-                    ScanKey orderbys, int norderbys)
+static TableScanDesc
+optimized_scan_begin(Relation rel, Snapshot snapshot,
+                    int nkeys, struct ScanKeyData *key,
+                    ParallelTableScanDesc pscan, uint32 flags)
 {
-    /* Initialize scan state */
-    scan->rs_rd = scan->rs_rd;
-    scan->rs_snapshot = GetActiveSnapshot();
-    scan->rs_nkeys = nkeys;
-    scan->rs_key = keys;
-    scan->rs_norderbys = norderbys;
-    scan->rs_orderby = orderbys;
+    /* For now, delegate to heap AM since scan is not fully implemented */
+    const TableAmRoutine *heap_am = get_heap_am_routine();
+    return heap_am->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
 }
 
 static void
 optimized_scan_end(TableScanDesc scan)
 {
-    /* Clean up scan state */
-    if (scan->rs_snapshot)
-        UnregisterSnapshot(scan->rs_snapshot);
+    /* For now, delegate to heap AM since scan is not fully implemented */
+    const TableAmRoutine *heap_am = get_heap_am_routine();
+    heap_am->scan_end(scan);
 }
 
 static bool
 optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                           TupleTableSlot *slot)
 {
-    /* TODO: Implement actual tuple retrieval */
-    return false;
+    /* For now, delegate to heap AM since scan is not fully implemented */
+    const TableAmRoutine *heap_am = get_heap_am_routine();
+    return heap_am->scan_getnextslot(scan, direction, slot);
 }
 
 /*
  * optimized_getattr
- *		Extract an attribute of an optimized tuple and return it as a Datum.
- *		This works for either system or user attributes. The given attnum
- *		is properly range-checked.
+ *      Extract an attribute of an optimized tuple and return it as a Datum.
+ *      This works for either system or user attributes. The given attnum
+ *      is properly range-checked.
  *
- *		If the field in question has a NULL value, we return a zero Datum
- *		and set *isnull == true. Otherwise, we set *isnull == false.
+ *      If the field in question has a NULL value, we return a zero Datum
+ *      and set *isnull == true. Otherwise, we set *isnull == false.
  *
- *		<tuple> is the pointer to the optimized tuple. <attnum> is the attribute
- *		number of the column (field) caller wants. <tupleDesc> is a pointer
- *		to the structure describing the row and all its fields.
+ *      <tuple> is the pointer to the optimized tuple. <attnum> is the attribute
+ *      number of the column (field) caller wants. <tupleDesc> is a pointer
+ *      to the structure describing the row and all its fields.
  */
-static inline Datum
+static Datum
 optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull)
 {
     if (attnum > 0)
     {
+        int phys_pos = 0;
+        int offset = 0;
+        Form_pg_attribute att = NULL;
+        char *tp = NULL;
+
         /* User attribute */
         if (attnum > (int) HeapTupleHeaderGetNatts(tuple->t_data))
             return getmissingattr(tupleDesc, attnum, isnull);
@@ -233,7 +255,7 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
         }
 
         /* Get the physical position of this attribute */
-        int phys_pos = get_physical_position(tuple->t_tableOid, attnum);
+        phys_pos = get_physical_position(tuple->t_tableOid, attnum);
         if (phys_pos < 0)
         {
             *isnull = true;
@@ -241,7 +263,7 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
         }
 
         /* Get the offset to the attribute's data */
-        int offset = get_column_offset(tuple, phys_pos);
+        offset = get_column_offset(tupleDesc, tuple, attnum);
         if (offset < 0)
         {
             *isnull = true;
@@ -249,34 +271,14 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
         }
 
         /* Get the attribute's data */
-        Form_pg_attribute att = TupleDescAttr(tupleDesc, attnum - 1);
-        char *tp = (char *) tuple->t_data + tuple->t_data->t_hoff;
+        att = TupleDescAttr(tupleDesc, attnum - 1);
+        tp = (char *) tuple->t_data + tuple->t_data->t_hoff;
         return fetchatt(att, tp + offset);
     }
     else
     {
         /* System attribute */
         return heap_getsysattr(tuple, attnum, tupleDesc, isnull);
-    }
-}
-
-/* Helper function to get variable column offset */
-static uint32
-get_column_offset(HeapTuple tuple, int attnum)
-{
-    OptimizedTupleHeader tup = (OptimizedTupleHeader) tuple->t_data;
-    int physical_pos = get_physical_position(tuple->t_tableOid, attnum);
-    Form_pg_attribute attr = TupleDescAttr(tuple->t_tableOid, attnum - 1);
-
-    /* For fixed-length columns, use the macro */
-    if (!attr->attisdropped && !VARLENA_ATT_IS_EXTERNAL(attr))
-    {
-        return OPTIMIZED_FIXED_COL_OFFSET(tup, attnum);
-    }
-    /* For variable-length columns, use the macro */
-    else
-    {
-        return OPTIMIZED_VAR_COL_OFFSET(tup, attnum);
     }
 }
 
@@ -300,19 +302,24 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     Size len;
     Size fixed_data_len = 0;
     Size var_data_len = 0;
-    int fixed_col_count = 0;
     int var_col_count = 0;
     int i;
     TupleDesc tupdesc = RelationGetDescr(relation);
     Buffer buffer;
+    Buffer vmbuffer = InvalidBuffer;
+    Buffer vmbuffer_other = InvalidBuffer;
     Page page;
     OffsetNumber offnum;
-    TransactionId xid = GetCurrentTransactionId();
     char *fixed_data;
     char *var_data;
     uint32 *var_offsets;
     int fixed_pos = 0;
     int var_pos = 0;
+    char *null_bitmap;
+    ItemPointerData InvalidItemPointer;
+    int var_col_index = 0;  /* Track which variable column we're processing */
+    int bitmask = 0x80;     /* Start with high bit (10000000) */
+    bits8 *bitP;            /* Pointer to current byte in null bitmap */
 
     /* First pass: Count columns and calculate lengths */
     for (i = 0; i < tupdesc->natts; i++)
@@ -322,14 +329,12 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
         {
             if (att->attlen > 0)
             {
-                fixed_col_count++;
                 fixed_data_len += att->attlen;
             }
             else
             {
                 var_col_count++;
-                /* Reserve space for offset */
-                var_data_len += sizeof(uint32);
+                /* We'll calculate actual variable data length in second pass */
             }
         }
     }
@@ -348,8 +353,34 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     /* Add space for fixed-length columns */
     len += MAXALIGN(fixed_data_len);
 
+    /* Calculate variable data length by examining the slot */
+    for (i = 0; i < tupdesc->natts; i++)
+    {
+        Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+        Datum value;
+        bool isnull;
+
+        if (att->attisdropped || att->attlen > 0)
+            continue;
+
+        value = slot_getattr(slot, i + 1, &isnull);
+        if (!isnull)
+        {
+            if (att->attlen == -1)  /* varlena */
+            {
+                var_data_len += VARSIZE_ANY(DatumGetPointer(value));
+            }
+            else  /* cstring */
+            {
+                var_data_len += strlen(DatumGetCString(value)) + 1;
+            }
+        }
+    }
+
     /* Add space for variable-length columns */
     len += MAXALIGN(var_data_len);
+
+	ItemPointerSetInvalid(&InvalidItemPointer);
 
     /* Allocate the tuple */
     tuple = (HeapTuple) palloc0(HEAPTUPLESIZE + len);
@@ -366,12 +397,14 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     header->t_hoff = SizeofOptimizedTupleHeader;
 
     /* Set up pointers to data sections */
-    char *null_bitmap = (char *) header + header->t_hoff;
+    null_bitmap = (char *) header + header->t_hoff;
     var_offsets = (uint32 *) (null_bitmap + BITMAPLEN(tupdesc->natts));
     fixed_data = (char *) (var_offsets + var_col_count);
     var_data = (char *) (fixed_data + MAXALIGN(fixed_data_len));
 
     /* Second pass: Copy data into reorganized layout */
+    bitP = (bits8 *)null_bitmap;  /* Pointer to current byte in null bitmap */
+
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
@@ -385,9 +418,30 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
         if (isnull)
         {
-            att_setnull(i, header->t_bits);
-            continue;
+            /* Set the null bit for this column */
+            header->t_infomask |= HEAP_HASNULL;
+            /* Clear the bit (0 = null, 1 = not null) */
+            *bitP &= ~bitmask;
         }
+        else
+        {
+            /* Set the bit (1 = not null) */
+            *bitP |= bitmask;
+        }
+
+        /* Move to next bit */
+        if (bitmask == 0x01)
+        {
+            bitmask = 0x80;
+            bitP++;
+        }
+        else
+        {
+            bitmask >>= 1;
+        }
+
+        if (isnull)
+            continue;
 
         if (att->attlen > 0)
         {
@@ -409,14 +463,24 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                 varlen = strlen(DatumGetCString(value)) + 1;
                 memcpy(var_data + var_pos, DatumGetCString(value), varlen);
             }
-            var_offsets[var_pos] = var_pos;
+            var_offsets[var_col_index] = var_pos;
             var_pos += varlen;
+            var_col_index++;
         }
     }
 
     /* Get a buffer to insert the tuple */
-    buffer = RelationGetBufferForTuple(relation, len, InvalidBuffer, options, bistate);
+    buffer = RelationGetBufferForTuple(relation, len, InvalidBuffer, options,
+                                     bistate, &vmbuffer, &vmbuffer_other, 1);
+
+    /* Get the page from the buffer */
     page = BufferGetPage(buffer);
+
+    /* Release visibility map pins if we got them */
+    if (BufferIsValid(vmbuffer))
+        ReleaseBuffer(vmbuffer);
+    if (BufferIsValid(vmbuffer_other))
+        ReleaseBuffer(vmbuffer_other);
 
     /* Insert the tuple */
     offnum = PageAddItem(page, (Item) tuple->t_data, len, InvalidOffsetNumber, false, true);
@@ -438,7 +502,8 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
 static void
 optimized_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
-                                 CommandId cid, int options, struct BulkInsertStateData *bistate)
+                                 CommandId cid, int options, struct BulkInsertStateData *bistate,
+                                 uint32 specToken)
 {
     /* TODO: Implement speculative insert */
 }

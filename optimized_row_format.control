@@ -1,0 +1,6 @@
+# optimized_row_format extension
+comment = 'Optimized row format for PostgreSQL tables'
+default_version = '1.0'
+module_pathname = '$libdir/optimized_row_format'
+relocatable = true
+schema = public

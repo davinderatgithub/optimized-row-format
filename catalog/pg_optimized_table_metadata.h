@@ -42,6 +42,6 @@ CATALOG(pg_optimized_table_metadata,12345,OptimizedTableMetadataRelationId)
  */
 typedef FormData_pg_optimized_table_metadata *Form_pg_optimized_table_metadata;
 
-DECLARE_UNIQUE_INDEX(pg_optimized_table_metadata_relid_index, 12346, OptimizedTableMetadataRelidIndexId, on pg_optimized_table_metadata using btree (relid oid_ops));
+DECLARE_UNIQUE_INDEX(pg_optimized_table_metadata_relid_index, 12346, OptimizedTableMetadataRelidIndexId, pg_optimized_table_metadata, on pg_optimized_table_metadata using btree (relid oid_ops));
 
 #endif                            /* PG_OPTIMIZED_TABLE_METADATA_H */

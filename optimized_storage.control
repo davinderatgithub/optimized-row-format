@@ -1,6 +1,0 @@
-# optimized_storage extension
-comment = 'Optimized storage format for PostgreSQL tables'
-default_version = '1.0'
-module_pathname = '$libdir/optimized_storage'
-relocatable = true
-schema = public

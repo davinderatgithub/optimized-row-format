@@ -1,6 +1,6 @@
-# Optimized Storage Extension for PostgreSQL
+# Optimized Row Format Extension for PostgreSQL
 
-This extension provides an optimized storage format for PostgreSQL tables, focusing on efficient data layout and access patterns.
+This extension provides an optimized row format for PostgreSQL tables, focusing on efficient data layout and access patterns.
 
 ## Overview
 
@@ -189,16 +189,16 @@ make install
 
 ## Usage
 
-After installation, you can create a table using the optimized storage format:
+After installation, you can create a table using the optimized row format:
 
 ```sql
-CREATE EXTENSION optimized_storage;
+CREATE EXTENSION optimized_row_format;
 
 CREATE TABLE my_table (
     id integer,
     name text,
     data bytea
-) USING optimized_storage;
+) USING optimized_row_format;
 ```
 
 ## Implementation Details
@@ -225,6 +225,10 @@ The extension implements several optimizations:
 ## Testing
 
 - pageinspect can be used to phsycally validate the row format
+
+## Todo
+- Fetching only the column needed.
+
 
 ## Development
 
