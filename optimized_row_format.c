@@ -118,7 +118,7 @@ PG_MODULE_MAGIC;
 
 
 /* Forward declarations */
-static const TableAmRoutine optimized_tableam;
+static TableAmRoutine optimized_tableam;
 
 /* Get the heap AM routine to delegate operations to */
 static const TableAmRoutine *
@@ -132,6 +132,8 @@ static TableScanDesc optimized_scan_begin(Relation rel, Snapshot snapshot,
                                         int nkeys, struct ScanKeyData *key,
                                         ParallelTableScanDesc pscan, uint32 flags);
 static void optimized_scan_end(TableScanDesc scan);
+static void optimized_scan_rescan(TableScanDesc scan, ScanKey key, bool set_params,
+                                 bool allow_strat, bool allow_sync, bool allow_pagemode);
 static bool optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                                      TupleTableSlot *slot);
 static Datum optimized_getattr(HeapTuple tuple, int attnum,
@@ -143,49 +145,41 @@ static void optimized_tuple_insert_speculative(Relation relation, TupleTableSlot
                                              uint32 specToken);
 static void optimized_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
                                                uint32 specToken, bool succeeded);
+static Size optimized_parallelscan_estimate(Relation rel);
+static bool optimized_relation_needs_toast_table(Relation rel);
+
+/* Table access method handler */
+static bool optimized_tableam_initialized = false;
 
 /* Table AM handler function */
 PG_FUNCTION_INFO_V1(optimized_row_format_tableam_handler);
-
-/* Table access method handler */
-static const TableAmRoutine optimized_tableam = {
-    .type = T_TableAmRoutine,
-
-    /* Slot related callbacks */
-    .slot_callbacks = NULL,  /* Use heap's slot callbacks */
-
-    /* Scan related callbacks */
-    .scan_begin = optimized_scan_begin,
-    .scan_end = optimized_scan_end,
-    .scan_rescan = NULL,  /* Use heap's rescan */
-    .scan_getnextslot = optimized_scan_getnextslot,
-
-    /* Keep only the fully implemented functions */
-    //.getattr = optimized_getattr,
-    .tuple_insert = optimized_tuple_insert,
-
-    /* Delegate the rest to heap AM by setting to NULL */
-    .tuple_insert_speculative = NULL,
-    .tuple_complete_speculative = NULL,
-    .multi_insert = NULL,
-    .tuple_delete = NULL,
-    .tuple_update = NULL,
-    .tuple_lock = NULL,
-    .relation_size = NULL,
-    .relation_needs_toast_table = NULL,
-    .relation_toast_am = NULL,
-    .relation_fetch_toast_slice = NULL,
-    .relation_estimate_size = NULL,
-    .scan_bitmap_next_block = NULL,
-    .scan_bitmap_next_tuple = NULL,
-    .scan_sample_next_block = NULL,
-    .scan_sample_next_tuple = NULL
-};
-
-/* Table AM handler function */
 Datum
 optimized_row_format_tableam_handler(PG_FUNCTION_ARGS)
 {
+	if (!optimized_tableam_initialized)
+	{
+		const TableAmRoutine *heap_am = get_heap_am_routine();
+
+		/*
+		 * Copy the entire heap AM routine and then override the functions
+		 * we want to implement. This is more robust than initializing
+		 * everything manually.
+		 */
+		memcpy(&optimized_tableam, heap_am, sizeof(TableAmRoutine));
+
+		/* Override with our custom functions */
+		optimized_tableam.type = T_TableAmRoutine;
+		optimized_tableam.scan_begin = optimized_scan_begin;
+		optimized_tableam.scan_end = optimized_scan_end;
+		optimized_tableam.scan_rescan = optimized_scan_rescan;
+		optimized_tableam.scan_getnextslot = optimized_scan_getnextslot;
+		optimized_tableam.parallelscan_estimate = optimized_parallelscan_estimate;
+		optimized_tableam.tuple_insert = optimized_tuple_insert;
+		optimized_tableam.relation_needs_toast_table = optimized_relation_needs_toast_table;
+
+		optimized_tableam_initialized = true;
+	}
+
     PG_RETURN_POINTER(&optimized_tableam);
 }
 
@@ -208,6 +202,15 @@ optimized_scan_end(TableScanDesc scan)
     heap_am->scan_end(scan);
 }
 
+static void
+optimized_scan_rescan(TableScanDesc scan, ScanKey key, bool set_params,
+                     bool allow_strat, bool allow_sync, bool allow_pagemode)
+{
+    /* For now, delegate to heap AM since scan is not fully implemented */
+    const TableAmRoutine *heap_am = get_heap_am_routine();
+    heap_am->scan_rescan(scan, key, set_params, allow_strat, allow_sync, allow_pagemode);
+}
+
 static bool
 optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                           TupleTableSlot *slot)
@@ -215,6 +218,14 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
     /* For now, delegate to heap AM since scan is not fully implemented */
     const TableAmRoutine *heap_am = get_heap_am_routine();
     return heap_am->scan_getnextslot(scan, direction, slot);
+}
+
+static Size
+optimized_parallelscan_estimate(Relation rel)
+{
+	/* For now, delegate to heap AM since scan is not fully implemented */
+	const TableAmRoutine *heap_am = get_heap_am_routine();
+	return heap_am->parallelscan_estimate(rel);
 }
 
 /*
@@ -318,8 +329,6 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     char *null_bitmap;
     ItemPointerData InvalidItemPointer;
     int var_col_index = 0;  /* Track which variable column we're processing */
-    int bitmask = 0x80;     /* Start with high bit (10000000) */
-    bits8 *bitP;            /* Pointer to current byte in null bitmap */
 
     /* First pass: Count columns and calculate lengths */
     for (i = 0; i < tupdesc->natts; i++)
@@ -399,12 +408,13 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     /* Set up pointers to data sections */
     null_bitmap = (char *) header + header->t_hoff;
     var_offsets = (uint32 *) (null_bitmap + BITMAPLEN(tupdesc->natts));
-    fixed_data = (char *) (var_offsets + var_col_count);
-    var_data = (char *) (fixed_data + MAXALIGN(fixed_data_len));
+    fixed_data = (char *) (var_offsets) + MAXALIGN(var_col_count * sizeof(uint32));
+    var_data = fixed_data + MAXALIGN(fixed_data_len);
+
+    /* Initialize null bitmap to all zeros */
+    memset(null_bitmap, 0, BITMAPLEN(tupdesc->natts));
 
     /* Second pass: Copy data into reorganized layout */
-    bitP = (bits8 *)null_bitmap;  /* Pointer to current byte in null bitmap */
-
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
@@ -418,26 +428,14 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
         if (isnull)
         {
-            /* Set the null bit for this column */
+            /* Set the null bit for this column (0 = null) */
             header->t_infomask |= HEAP_HASNULL;
-            /* Clear the bit (0 = null, 1 = not null) */
-            *bitP &= ~bitmask;
+            /* Bit is already 0 from memset, so nothing to do */
         }
         else
         {
             /* Set the bit (1 = not null) */
-            *bitP |= bitmask;
-        }
-
-        /* Move to next bit */
-        if (bitmask == 0x01)
-        {
-            bitmask = 0x80;
-            bitP++;
-        }
-        else
-        {
-            bitmask >>= 1;
+            null_bitmap[i >> 3] |= (1 << (i & 0x07));
         }
 
         if (isnull)
@@ -513,4 +511,11 @@ optimized_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
                                    uint32 specToken, bool succeeded)
 {
     /* TODO: Implement speculative insert completion */
+}
+
+static bool
+optimized_relation_needs_toast_table(Relation rel)
+{
+	/* For now, disable TOAST tables for this AM */
+	return false;
 }
