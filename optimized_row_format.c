@@ -215,9 +215,52 @@ static bool
 optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                           TupleTableSlot *slot)
 {
-    /* For now, delegate to heap AM since scan is not fully implemented */
+    HeapTuple tuple;
+    bool found;
+    bool shouldFree;
+
+    /* First, get the next tuple using heap AM's scanning logic */
     const TableAmRoutine *heap_am = get_heap_am_routine();
-    return heap_am->scan_getnextslot(scan, direction, slot);
+    found = heap_am->scan_getnextslot(scan, direction, slot);
+
+    if (!found)
+        return false;
+
+    /* Get the tuple from the slot */
+    tuple = ExecFetchSlotHeapTuple(slot, false, &shouldFree);
+    if (tuple == NULL)
+        return false;
+
+    /* Now we need to extract attributes using our custom format */
+    TupleDesc tupdesc = slot->tts_tupleDescriptor;
+    int natts = tupdesc->natts;
+
+    /* Clear the slot to prepare for our custom values */
+    ExecClearTuple(slot);
+
+    /* Extract all attributes using our optimized format */
+    for (int i = 0; i < natts; i++)
+    {
+        Datum value;
+        bool isnull;
+
+        /* Use our custom getattr function to extract the value */
+        value = optimized_getattr(tuple, i + 1, tupdesc, &isnull);
+
+        /* Store the value directly in the slot */
+        slot->tts_values[i] = value;
+        slot->tts_isnull[i] = isnull;
+    }
+
+    /* Mark the slot as having valid data */
+    slot->tts_nvalid = natts;
+    slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+    /* If we need to free the tuple, do it now */
+    if (shouldFree && tuple)
+        heap_freetuple(tuple);
+
+    return true;
 }
 
 static Size
@@ -226,6 +269,147 @@ optimized_parallelscan_estimate(Relation rel)
 	/* For now, delegate to heap AM since scan is not fully implemented */
 	const TableAmRoutine *heap_am = get_heap_am_routine();
 	return heap_am->parallelscan_estimate(rel);
+}
+
+/*
+ * optimized_extract_attribute
+ *      Extract a single attribute from an optimized tuple format.
+ *      This function understands our custom layout and extracts data directly.
+ */
+static Datum
+optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull)
+{
+    OptimizedTupleHeader header = (OptimizedTupleHeader) tuple->t_data;
+    Form_pg_attribute att = TupleDescAttr(tupleDesc, attnum - 1);
+    char *null_bitmap;
+    uint32 *var_col_count_ptr;
+    uint32 var_col_count;
+    uint32 *var_offsets;
+    char *fixed_data;
+    char *var_data;
+    int fixed_pos = 0;
+    int i;
+
+    elog(DEBUG1, "optimized_extract_attribute: attnum=%d, attname=%s, attlen=%d",
+         attnum, NameStr(att->attname), att->attlen);
+
+    /* Set up pointers to data sections */
+    null_bitmap = (char *) header + header->t_hoff;
+    var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupleDesc->natts)));
+    var_col_count = *var_col_count_ptr;
+    var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+
+    elog(DEBUG1, "optimized_extract_attribute: var_col_count=%u, natts=%d",
+         var_col_count, tupleDesc->natts);
+
+    /* Calculate fixed data length to find where variable data starts */
+    // todo : might need change design as this is not efficient,
+    // we should store this info somewhere else
+    Size fixed_data_len = 0;
+    for (i = 0; i < tupleDesc->natts; i++)
+    {
+        Form_pg_attribute curr_att = TupleDescAttr(tupleDesc, i);
+        if (!curr_att->attisdropped && curr_att->attlen > 0)
+            fixed_data_len += curr_att->attlen;
+    }
+
+    fixed_data = (char *) (var_offsets) + MAXALIGN(var_col_count * sizeof(uint32));
+    var_data = fixed_data + MAXALIGN(fixed_data_len);
+
+    elog(DEBUG1, "optimized_extract_attribute: fixed_data_len=%zu, fixed_data=%p, var_data=%p",
+         fixed_data_len, fixed_data, var_data);
+
+    *isnull = false;
+
+    /* Handle fixed-length columns */
+    if (att->attlen > 0)
+    {
+        /* Calculate offset within fixed data section */
+        for (i = 0; i < attnum - 1; i++)
+        {
+            Form_pg_attribute curr_att = TupleDescAttr(tupleDesc, i);
+            if (!curr_att->attisdropped && curr_att->attlen > 0)
+                fixed_pos += curr_att->attlen;
+        }
+
+        elog(DEBUG1, "optimized_extract_attribute: fixed column, fixed_pos=%d", fixed_pos);
+
+        /* Extract the data directly based on attribute type */
+        char *data_ptr = fixed_data + fixed_pos;
+
+        if (att->attbyval)
+        {
+            /* Pass-by-value: extract the value based on length */
+            switch (att->attlen)
+            {
+                case sizeof(char):
+                    {
+                        char val = *((char *) data_ptr);
+                        elog(DEBUG1, "optimized_extract_attribute: char value=%d", val);
+                        return CharGetDatum(val);
+                    }
+                case sizeof(int16):
+                    {
+                        int16 val = *((int16 *) data_ptr);
+                        elog(DEBUG1, "optimized_extract_attribute: int16 value=%d", val);
+                        return Int16GetDatum(val);
+                    }
+                case sizeof(int32):
+                    {
+                        int32 val = *((int32 *) data_ptr);
+                        elog(DEBUG1, "optimized_extract_attribute: int32 value=%d", val);
+                        return Int32GetDatum(val);
+                    }
+#if SIZEOF_DATUM == 8
+                case sizeof(Datum):
+                    {
+                        Datum val = *((Datum *) data_ptr);
+                        elog(DEBUG1, "optimized_extract_attribute: Datum value=%ld", val);
+                        return val;
+                    }
+#endif
+                default:
+                    elog(ERROR, "unsupported byval length: %d", att->attlen);
+                    return (Datum) 0;
+            }
+        }
+        else
+        {
+            /* Pass-by-reference: return pointer to the data */
+            elog(DEBUG1, "optimized_extract_attribute: fixed pass-by-ref, data_ptr=%p", data_ptr);
+            return PointerGetDatum(data_ptr);
+        }
+    }
+    /* Handle variable-length columns */
+    else
+    {
+        /* Find which variable column this is */
+        int var_index = 0;
+        for (i = 0; i < attnum - 1; i++)
+        {
+            Form_pg_attribute curr_att = TupleDescAttr(tupleDesc, i);
+            if (!curr_att->attisdropped && curr_att->attlen <= 0)
+                var_index++;
+        }
+
+        elog(DEBUG1, "optimized_extract_attribute: variable column, var_index=%d", var_index);
+
+        /* Get the data from the variable section using the offset */
+        if (var_index < var_col_count)
+        {
+            uint32 offset = var_offsets[var_index];
+            char *var_data_ptr = var_data + offset;
+            elog(DEBUG1, "optimized_extract_attribute: var offset=%u, var_data_ptr=%p", offset, var_data_ptr);
+            /* Variable-length data is always pass-by-reference */
+            return PointerGetDatum(var_data_ptr);
+        }
+        else
+        {
+            elog(DEBUG1, "optimized_extract_attribute: var_index >= var_col_count, returning NULL");
+            *isnull = true;
+            return (Datum) NULL;
+        }
+    }
 }
 
 /*
@@ -246,13 +430,8 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
 {
     if (attnum > 0)
     {
-        int phys_pos = 0;
-        int offset = 0;
-        Form_pg_attribute att = NULL;
-        char *tp = NULL;
-
         /* User attribute */
-        if (attnum > (int) HeapTupleHeaderGetNatts(tuple->t_data))
+        if (attnum > tupleDesc->natts)
             return getmissingattr(tupleDesc, attnum, isnull);
 
         /* Check for null value using the null bitmap */
@@ -265,26 +444,8 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
             }
         }
 
-        /* Get the physical position of this attribute */
-        phys_pos = get_physical_position(tuple->t_tableOid, attnum);
-        if (phys_pos < 0)
-        {
-            *isnull = true;
-            return (Datum) NULL;
-        }
-
-        /* Get the offset to the attribute's data */
-        offset = get_column_offset(tupleDesc, tuple, attnum);
-        if (offset < 0)
-        {
-            *isnull = true;
-            return (Datum) NULL;
-        }
-
-        /* Get the attribute's data */
-        att = TupleDescAttr(tupleDesc, attnum - 1);
-        tp = (char *) tuple->t_data + tuple->t_data->t_hoff;
-        return fetchatt(att, tp + offset);
+        /* Extract the attribute using our custom format */
+        return optimized_extract_attribute(tuple, attnum, tupleDesc, isnull);
     }
     else
     {
@@ -406,7 +567,8 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     header = (OptimizedTupleHeader) tuple->t_data;
     header->t_len = len;
     header->t_infomask = HEAP_HASNULL;  /* We always have null bitmap */
-    header->t_infomask2 = tupdesc->natts;
+    header->t_infomask2 = 0;  /* Initialize to 0 first */
+    HeapTupleHeaderSetNatts(header, tupdesc->natts);  /* Set natts properly */
     header->t_hoff = SizeofOptimizedTupleHeader;
 
     /* Set up pointers to data sections */
