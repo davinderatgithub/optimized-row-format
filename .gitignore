@@ -5,7 +5,6 @@
 *.dll
 
 # Build artifacts
-*.sql
 *.control.tmp
 
 # Debug files
@@ -33,9 +32,7 @@
 .DS_Store
 Thumbs.db
 
-# Test output
+# Test output (but keep expected outputs)
 regression.diffs
 regression.out
-results/
-expected/
-sql/
+test/results/
