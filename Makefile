@@ -1,9 +1,7 @@
 MODULE_big = optimized_row_format
 OBJS = \
     $(WIN32RES) \
-    optimized_row_format.o \
-    optimized_metadata.o \
-    optimized_layout.o
+    optimized_row_format.o
 
 EXTENSION = optimized_row_format
 DATA = sql/optimized_row_format.sql

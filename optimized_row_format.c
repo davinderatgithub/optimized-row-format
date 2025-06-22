@@ -105,9 +105,8 @@ PG_MODULE_MAGIC;
  * -----------------
  * When accessing null values in a tuple:
  * 1. Use the original column number (attnum) to check the null bitmap
- * 2. Use the physical position (from get_physical_position()) to access the data
- * 3. The translation between original and physical positions is handled by
- *    get_physical_position() and get_column_offset()
+ * 2. The data is stored in the order: fixed-length columns first, then variable-length columns
+ * 3. Column positions are calculated dynamically based on the table schema
  *
  * Example:
  * - Table: CREATE TABLE t (a int, b text, c int, d text);
