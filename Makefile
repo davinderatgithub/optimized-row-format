@@ -4,10 +4,11 @@ OBJS = \
     optimized_row_format.o
 
 EXTENSION = optimized_row_format
-DATA = sql/optimized_row_format.sql
+DATA = sql/optimized_row_format--1.0.sql
 PGFILEDESC = "optimized_row_format - optimized row format implementation"
 
-REGRESS = optimized_row_format
+REGRESS = optimized_row_format correctness
+REGRESS_OPTS = --inputdir=test --outputdir=test
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

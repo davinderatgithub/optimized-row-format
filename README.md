@@ -10,6 +10,27 @@ The optimized storage format reorganizes table data to improve performance by:
 - Using an array of offsets for variable-length columns
 - Minimizing padding and alignment overhead
 
+## Project Directory Structure
+
+```
+contrib/optimized_row_format/
+├── optimized_row_format.c          # Main implementation file
+├── optimized_row_format.h          # Header file with structure definitions
+├── optimized_row_format.control    # Extension control file
+├── Makefile                        # Build configuration
+├── README.md                       # This documentation
+├── .gitignore                      # Git ignore patterns
+├── sql/                            # SQL scripts directory
+│   └── optimized_row_format--1.0.sql  # Extension installation script
+└── test/                           # Test suite directory
+    ├── sql/                        # Test SQL files
+    │   ├── optimized_row_format.sql   # Basic functionality tests
+    │   └── correctness.sql            # Correctness comparison tests
+    └── expected/                   # Expected test outputs
+        ├── optimized_row_format.out   # Expected output for basic tests
+        └── correctness.out            # Expected output for correctness tests
+```
+
 ## Column Order and Physical Layout
 
 ### Why Column Order Matters
@@ -182,9 +203,117 @@ This layout and explanation clarify how PostgreSQL organizes rows on disk, how t
 The extension is located in the PostgreSQL contrib directory. To build it:
 
 ```bash
-cd contrib/optimized_storage
+cd contrib/optimized_row_format
 make
 make install
+```
+
+## Testing
+
+### Running Tests
+
+The extension includes a comprehensive test suite to verify functionality and correctness. Tests are implemented using PostgreSQL's regression testing framework.
+
+#### Running All Tests
+
+To run the complete test suite:
+
+```bash
+cd contrib/optimized_row_format
+make installcheck
+```
+
+This will run both the basic functionality tests and correctness comparison tests.
+
+#### Running Individual Tests
+
+To run specific test files:
+
+```bash
+# Run basic functionality tests only
+make installcheck REGRESS=optimized_row_format
+
+# Run correctness comparison tests only
+make installcheck REGRESS=correctness
+```
+
+#### Test Structure
+
+The test suite is organized into two main categories:
+
+1. **Basic Functionality Tests** (`test/sql/optimized_row_format.sql`)
+   - Extension creation and loading
+   - Table creation with optimized storage
+   - Basic INSERT and SELECT operations
+   - Data type compatibility verification
+
+2. **Correctness Tests** (`test/sql/correctness.sql`)
+   - Side-by-side comparison of heap vs optimized storage
+   - Identical data inserted into both storage formats
+   - Verification that query results are identical
+   - Partial column selection tests
+
+#### Test Requirements
+
+- PostgreSQL server must be running and accessible
+- Extension must be compiled and installed
+- User must have privileges to create extensions and tables
+- Tests run in a temporary database schema
+
+#### Expected Test Output
+
+Test results are compared against expected output files in `test/expected/`. If tests pass, you'll see:
+
+```
+============== running regression test queries        ==============
+test optimized_row_format         ... ok
+test correctness                  ... ok
+============== All 2 tests passed. ==============
+```
+
+#### Test Failures
+
+If tests fail, examine the differences between actual and expected output:
+
+```bash
+# View test differences
+diff test/results/optimized_row_format.out test/expected/optimized_row_format.out
+diff test/results/correctness.out test/expected/correctness.out
+```
+
+### Manual Testing
+
+You can also test the extension manually:
+
+```sql
+-- Load the extension
+CREATE EXTENSION optimized_row_format;
+
+-- Create a test table
+CREATE TABLE test_table (
+    id integer,
+    name text,
+    value bigint,
+    flag boolean
+) USING optimized_row_format;
+
+-- Insert test data
+INSERT INTO test_table VALUES (1, 'test', 100, true);
+
+-- Query the data
+SELECT * FROM test_table;
+```
+
+### Physical Validation
+
+You can use the `pageinspect` extension to physically validate the row format:
+
+```sql
+-- Install pageinspect if not already available
+CREATE EXTENSION IF NOT EXISTS pageinspect;
+
+-- Examine the page structure
+SELECT * FROM heap_page_items(get_raw_page('test_table', 0));
 ```
 
 ## Usage
