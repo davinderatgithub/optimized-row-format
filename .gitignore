@@ -1,0 +1,41 @@
+# Compiled object files
+*.o
+*.so
+*.dylib
+*.dll
+
+# Build artifacts
+*.sql
+*.control.tmp
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Log files
+*.log
+
+# Temporary files
+*~
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test output
+regression.diffs
+regression.out
+results/
+expected/
+sql/

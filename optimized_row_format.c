@@ -356,6 +356,10 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     len += BITMAPLEN(tupdesc->natts);
     len = MAXALIGN(len);  /* Align null bitmap */
 
+    /* Add space for variable column count (uint32) */
+    len += sizeof(uint32);
+    len = MAXALIGN(len);  /* Align var column count */
+
     /* Add space for variable offsets array */
     len += MAXALIGN(var_col_count * sizeof(uint32));
 
@@ -407,12 +411,16 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
     /* Set up pointers to data sections */
     null_bitmap = (char *) header + header->t_hoff;
-    var_offsets = (uint32 *) (null_bitmap + BITMAPLEN(tupdesc->natts));
+    uint32 *var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupdesc->natts)));
+    var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
     fixed_data = (char *) (var_offsets) + MAXALIGN(var_col_count * sizeof(uint32));
     var_data = fixed_data + MAXALIGN(fixed_data_len);
 
     /* Initialize null bitmap to all zeros */
     memset(null_bitmap, 0, BITMAPLEN(tupdesc->natts));
+
+    /* Store the variable column count */
+    *var_col_count_ptr = var_col_count;
 
     /* Second pass: Copy data into reorganized layout */
     for (i = 0; i < tupdesc->natts; i++)
@@ -443,8 +451,17 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
         if (att->attlen > 0)
         {
-            /* Fixed-length column - copy directly */
-            memcpy(fixed_data + fixed_pos, DatumGetPointer(value), att->attlen);
+            /* Fixed-length column - copy based on data type */
+            if (att->attbyval)
+            {
+                /* Pass-by-value: store the datum directly */
+                store_att_byval(fixed_data + fixed_pos, value, att->attlen);
+            }
+            else
+            {
+                /* Pass-by-reference: copy the data */
+                memcpy(fixed_data + fixed_pos, DatumGetPointer(value), att->attlen);
+            }
             fixed_pos += att->attlen;
         }
         else
@@ -492,7 +509,7 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     MarkBufferDirty(buffer);
 
     /* Release the buffer */
-    ReleaseBuffer(buffer);
+    UnlockReleaseBuffer(buffer);
 
     /* Free the tuple */
     pfree(tuple);
