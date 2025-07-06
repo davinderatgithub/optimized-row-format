@@ -39,6 +39,13 @@
 PG_MODULE_MAGIC;
 
 /*
+ * Custom logging for optimized row format extension
+ * This allows us to control logging independently of PostgreSQL's general debug level
+ */
+#define OPTIMIZED_LOG(fmt, ...) \
+    elog(DEBUG1, "[OPTIMIZED_ROW_FORMAT] " fmt, ##__VA_ARGS__)
+
+/*
  * Optimized Storage Format
  * ------------------------
  * This module implements an optimized storage format for PostgreSQL tables that
@@ -50,12 +57,12 @@ PG_MODULE_MAGIC;
  *
  * 1. Tuple Header (SizeofOptimizedTupleHeader bytes)
  *    - Contains standard PostgreSQL tuple header fields
- *    - t_hoff points to the start of the null bitmap
+ *    - t_hoff points to the start of the null bitmap (if present) or variable column count
  *
- * 2. Null Bitmap (BITMAPLEN(natts) bytes)
+ * 2. Null Bitmap (BITMAPLEN(natts) bytes) - CONDITIONAL
  *    - One bit per column indicating NULL status
  *    - 1 = not null, 0 = null
- *    - Always present (HEAP_HASNULL is always set)
+ *    - Only present when HEAP_HASNULL is set (i.e., when there are actual null values)
  *    - IMPORTANT: The null bitmap maintains the user's original column order
  *      rather than the physical storage order. This means:
  *      - Bit 0 corresponds to the first column in the user's table definition
@@ -71,8 +78,9 @@ PG_MODULE_MAGIC;
  *      tuple access functions and catalog information.
  *
  * 3. Variable-Length Offsets Array (var_col_count * sizeof(uint32) bytes)
- *    - Array of offsets pointing to variable-length column data
- *    - Each offset is relative to the start of variable-length data section
+ *    - Array of absolute offsets pointing to variable-length column data
+ *    - Each offset is relative to the start of the tuple header (not relative to variable data section)
+ *    - This eliminates the need to compute fixed data length during extraction
  *    - Only present if table has variable-length columns
  *
  * 4. Fixed-Length Columns (fixed_data_len bytes)
@@ -83,12 +91,12 @@ PG_MODULE_MAGIC;
  * 5. Variable-Length Data (var_data_len bytes)
  *    - All variable-length columns stored contiguously
  *    - Each column's data is stored in full (including varlena header)
- *    - Offsets array provides quick access to each column's data
+ *    - Absolute offsets array provides direct access to each column's data
  *
  * Alignment:
  * ---------
  * - Header is MAXALIGN'd
- * - Null bitmap is MAXALIGN'd
+ * - Null bitmap is MAXALIGN'd (when present)
  * - Variable offsets array is MAXALIGN'd
  * - Fixed-length data section is MAXALIGN'd
  * - Variable-length data section is MAXALIGN'd
@@ -96,23 +104,33 @@ PG_MODULE_MAGIC;
  * Benefits:
  * --------
  * 1. Efficient access to fixed-length columns (no offset calculations needed)
- * 2. Quick NULL checks using bitmap
- * 3. Fast access to variable-length columns through offset array
+ * 2. Quick NULL checks using bitmap (when present)
+ * 3. Fast access to variable-length columns through absolute offset array
  * 4. Better cache utilization due to data locality
  * 5. Reduced overhead compared to standard heap format
+ * 6. Space efficiency: no null bitmap when no null values exist
+ * 7. No need to compute fixed data length during extraction (performance improvement)
  *
  * Null Bitmap Access:
  * -----------------
  * When accessing null values in a tuple:
- * 1. Use the original column number (attnum) to check the null bitmap
- * 2. The data is stored in the order: fixed-length columns first, then variable-length columns
- * 3. Column positions are calculated dynamically based on the table schema
+ * 1. Check if HEAP_HASNULL is set in t_infomask
+ * 2. If set, use the original column number (attnum) to check the null bitmap
+ * 3. If not set, all columns are non-null (no bitmap present)
+ * 4. The data is stored in the order: fixed-length columns first, then variable-length columns
+ * 5. Column positions are calculated dynamically based on the table schema
  *
  * Example:
  * - Table: CREATE TABLE t (a int, b text, c int, d text);
  * - Insert: INSERT INTO t VALUES (1, NULL, 2, 'hello');
- * - Null bitmap: [1,0,1,1] (1=not null, 0=null)
+ * - Null bitmap: [1,0,1,1] (1=not null, 0=null) - present because of NULL
  * - Physical layout: [1,2,NULL,'hello']
+ * - Variable offsets: [offset_to_b, offset_to_d] (absolute from tuple start)
+ *
+ * - Insert: INSERT INTO t VALUES (1, 'hello', 2, 'world');
+ * - No null bitmap (all values non-null)
+ * - Physical layout: [1,2,'hello','world']
+ * - Variable offsets: [offset_to_b, offset_to_d] (absolute from tuple start)
  */
 
 
@@ -280,7 +298,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
 {
     OptimizedTupleHeader header = (OptimizedTupleHeader) tuple->t_data;
     Form_pg_attribute att = TupleDescAttr(tupleDesc, attnum - 1);
-    char *null_bitmap;
+    char *null_bitmap = NULL;
     uint32 *var_col_count_ptr;
     uint32 var_col_count;
     uint32 *var_offsets;
@@ -289,34 +307,33 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
     int fixed_pos = 0;
     int i;
 
-    elog(DEBUG1, "optimized_extract_attribute: attnum=%d, attname=%s, attlen=%d",
+    OPTIMIZED_LOG("optimized_extract_attribute: attnum=%d, attname=%s, attlen=%d",
          attnum, NameStr(att->attname), att->attlen);
 
     /* Set up pointers to data sections */
-    null_bitmap = (char *) header + header->t_hoff;
-    var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupleDesc->natts)));
+    if (HeapTupleHasNulls(tuple))
+    {
+        /* Null bitmap is present */
+        null_bitmap = (char *) header + header->t_hoff;
+        var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupleDesc->natts)));
+    }
+    else
+    {
+        /* No null bitmap - variable column count starts after header with proper alignment */
+        char *data_start = (char *) header + header->t_hoff;
+        var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+    }
+
     var_col_count = *var_col_count_ptr;
     var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
 
-    elog(DEBUG1, "optimized_extract_attribute: var_col_count=%u, natts=%d",
-         var_col_count, tupleDesc->natts);
+    OPTIMIZED_LOG("optimized_extract_attribute: var_col_count=%u, natts=%d, hasnulls=%d",
+         var_col_count, tupleDesc->natts, HeapTupleHasNulls(tuple));
 
-    /* Calculate fixed data length to find where variable data starts */
-    // todo : might need change design as this is not efficient,
-    // we should store this info somewhere else
-    Size fixed_data_len = 0;
-    for (i = 0; i < tupleDesc->natts; i++)
-    {
-        Form_pg_attribute curr_att = TupleDescAttr(tupleDesc, i);
-        if (!curr_att->attisdropped && curr_att->attlen > 0)
-            fixed_data_len += curr_att->attlen;
-    }
-
+    /* Fixed data starts immediately after the variable offsets array */
     fixed_data = (char *) (var_offsets) + MAXALIGN(var_col_count * sizeof(uint32));
-    var_data = fixed_data + MAXALIGN(fixed_data_len);
 
-    elog(DEBUG1, "optimized_extract_attribute: fixed_data_len=%zu, fixed_data=%p, var_data=%p",
-         fixed_data_len, fixed_data, var_data);
+    OPTIMIZED_LOG("optimized_extract_attribute: fixed_data=%p", fixed_data);
 
     *isnull = false;
 
@@ -331,7 +348,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
                 fixed_pos += curr_att->attlen;
         }
 
-        elog(DEBUG1, "optimized_extract_attribute: fixed column, fixed_pos=%d", fixed_pos);
+        OPTIMIZED_LOG("optimized_extract_attribute: fixed column, fixed_pos=%d", fixed_pos);
 
         /* Extract the data directly based on attribute type */
         char *data_ptr = fixed_data + fixed_pos;
@@ -344,26 +361,26 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
                 case sizeof(char):
                     {
                         char val = *((char *) data_ptr);
-                        elog(DEBUG1, "optimized_extract_attribute: char value=%d", val);
+                        OPTIMIZED_LOG("optimized_extract_attribute: char value=%d", val);
                         return CharGetDatum(val);
                     }
                 case sizeof(int16):
                     {
                         int16 val = *((int16 *) data_ptr);
-                        elog(DEBUG1, "optimized_extract_attribute: int16 value=%d", val);
+                        OPTIMIZED_LOG("optimized_extract_attribute: int16 value=%d", val);
                         return Int16GetDatum(val);
                     }
                 case sizeof(int32):
                     {
                         int32 val = *((int32 *) data_ptr);
-                        elog(DEBUG1, "optimized_extract_attribute: int32 value=%d", val);
+                        OPTIMIZED_LOG("optimized_extract_attribute: int32 value=%d", val);
                         return Int32GetDatum(val);
                     }
 #if SIZEOF_DATUM == 8
                 case sizeof(Datum):
                     {
                         Datum val = *((Datum *) data_ptr);
-                        elog(DEBUG1, "optimized_extract_attribute: Datum value=%ld", val);
+                        OPTIMIZED_LOG("optimized_extract_attribute: Datum value=%ld", val);
                         return val;
                     }
 #endif
@@ -375,7 +392,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
         else
         {
             /* Pass-by-reference: return pointer to the data */
-            elog(DEBUG1, "optimized_extract_attribute: fixed pass-by-ref, data_ptr=%p", data_ptr);
+            OPTIMIZED_LOG("optimized_extract_attribute: fixed pass-by-ref, data_ptr=%p", data_ptr);
             return PointerGetDatum(data_ptr);
         }
     }
@@ -391,20 +408,20 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
                 var_index++;
         }
 
-        elog(DEBUG1, "optimized_extract_attribute: variable column, var_index=%d", var_index);
+        OPTIMIZED_LOG("optimized_extract_attribute: variable column, var_index=%d", var_index);
 
-        /* Get the data from the variable section using the offset */
+        /* Get the data from the variable section using the absolute offset */
         if (var_index < var_col_count)
         {
-            uint32 offset = var_offsets[var_index];
-            char *var_data_ptr = var_data + offset;
-            elog(DEBUG1, "optimized_extract_attribute: var offset=%u, var_data_ptr=%p", offset, var_data_ptr);
+            uint32 absolute_offset = var_offsets[var_index];
+            char *var_data_ptr = (char *)header + absolute_offset;
+            OPTIMIZED_LOG("optimized_extract_attribute: absolute offset=%u, var_data_ptr=%p", absolute_offset, var_data_ptr);
             /* Variable-length data is always pass-by-reference */
             return PointerGetDatum(var_data_ptr);
         }
         else
         {
-            elog(DEBUG1, "optimized_extract_attribute: var_index >= var_col_count, returning NULL");
+            OPTIMIZED_LOG("optimized_extract_attribute: var_index >= var_col_count, returning NULL");
             *isnull = true;
             return (Datum) NULL;
         }
@@ -486,17 +503,33 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     uint32 *var_offsets;
     int fixed_pos = 0;
     int var_pos = 0;
-    char *null_bitmap;
+    char *null_bitmap = NULL;
     ItemPointerData InvalidItemPointer;
     int var_col_index = 0;  /* Track which variable column we're processing */
+    bool hasnull = false;
+    bool *isnull_array;
+    Datum *values_array;
 
-    /* First pass: Count columns and calculate lengths */
+    OPTIMIZED_LOG("Starting optimized tuple insert for relation %s",
+                  RelationGetRelationName(relation));
+
+    /* Pre-allocate arrays to check for nulls */
+    isnull_array = (bool *) palloc0(tupdesc->natts * sizeof(bool));
+    values_array = (Datum *) palloc(tupdesc->natts * sizeof(Datum));
+
+    /* First pass: Check for nulls and count columns */
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
         if (!att->attisdropped)
         {
-            if (att->attlen > 0)
+            values_array[i] = slot_getattr(slot, i + 1, &isnull_array[i]);
+            if (isnull_array[i])
+            {
+                hasnull = true;
+                OPTIMIZED_LOG("Column %d (%s) is NULL", i + 1, NameStr(att->attname));
+            }
+            else if (att->attlen > 0)
             {
                 fixed_data_len += att->attlen;
             }
@@ -508,13 +541,20 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
         }
     }
 
+    OPTIMIZED_LOG("Tuple analysis: hasnull=%d, fixed_data_len=%zu, var_col_count=%d",
+                  hasnull, fixed_data_len, var_col_count);
+
     /* Calculate total length needed */
     len = SizeofOptimizedTupleHeader;
     len = MAXALIGN(len);  /* Align header */
 
-    /* Add space for null bitmap */
-    len += BITMAPLEN(tupdesc->natts);
-    len = MAXALIGN(len);  /* Align null bitmap */
+    /* Add space for null bitmap only if there are nulls */
+    if (hasnull)
+    {
+        len += BITMAPLEN(tupdesc->natts);
+        len = MAXALIGN(len);  /* Align null bitmap */
+        OPTIMIZED_LOG("Added null bitmap space: %d bytes", BITMAPLEN(tupdesc->natts));
+    }
 
     /* Add space for variable column count (uint32) */
     len += sizeof(uint32);
@@ -530,28 +570,26 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-        Datum value;
-        bool isnull;
-
         if (att->attisdropped || att->attlen > 0)
             continue;
 
-        value = slot_getattr(slot, i + 1, &isnull);
-        if (!isnull)
+        if (!isnull_array[i])
         {
             if (att->attlen == -1)  /* varlena */
             {
-                var_data_len += VARSIZE_ANY(DatumGetPointer(value));
+                var_data_len += VARSIZE_ANY(DatumGetPointer(values_array[i]));
             }
             else  /* cstring */
             {
-                var_data_len += strlen(DatumGetCString(value)) + 1;
+                var_data_len += strlen(DatumGetCString(values_array[i])) + 1;
             }
         }
     }
 
     /* Add space for variable-length columns */
     len += MAXALIGN(var_data_len);
+
+    OPTIMIZED_LOG("Final tuple length: %zu bytes (var_data_len=%zu)", len, var_data_len);
 
 	ItemPointerSetInvalid(&InvalidItemPointer);
 
@@ -565,46 +603,69 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     /* Initialize the header */
     header = (OptimizedTupleHeader) tuple->t_data;
     header->t_len = len;
-    header->t_infomask = HEAP_HASNULL;  /* We always have null bitmap */
+    header->t_infomask = 0;  /* Initialize to 0 first */
+    if (hasnull)
+        header->t_infomask |= HEAP_HASNULL;  /* Only set if there are nulls */
     header->t_infomask2 = 0;  /* Initialize to 0 first */
     HeapTupleHeaderSetNatts(header, tupdesc->natts);  /* Set natts properly */
     header->t_hoff = SizeofOptimizedTupleHeader;
 
+    OPTIMIZED_LOG("Header initialized: t_len=%u, t_infomask=0x%x, t_hoff=%u",
+                  header->t_len, header->t_infomask, header->t_hoff);
+
     /* Set up pointers to data sections */
-    null_bitmap = (char *) header + header->t_hoff;
-    uint32 *var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupdesc->natts)));
-    var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+    if (hasnull)
+    {
+        null_bitmap = (char *) header + header->t_hoff;
+        uint32 *var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupdesc->natts)));
+        var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+
+        /* Initialize null bitmap to all zeros */
+        memset(null_bitmap, 0, BITMAPLEN(tupdesc->natts));
+
+        /* Store the variable column count */
+        *var_col_count_ptr = var_col_count;
+    }
+    else
+    {
+        /* No null bitmap - ensure proper alignment for variable column count */
+        char *data_start = (char *) header + header->t_hoff;
+        uint32 *var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+        var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+
+        /* Store the variable column count */
+        *var_col_count_ptr = var_col_count;
+    }
+
     fixed_data = (char *) (var_offsets) + MAXALIGN(var_col_count * sizeof(uint32));
     var_data = fixed_data + MAXALIGN(fixed_data_len);
 
-    /* Initialize null bitmap to all zeros */
-    memset(null_bitmap, 0, BITMAPLEN(tupdesc->natts));
+    OPTIMIZED_LOG("Data pointers: fixed_data=%p, var_data=%p", fixed_data, var_data);
 
-    /* Store the variable column count */
-    *var_col_count_ptr = var_col_count;
+    /* Calculate the base offset for absolute positioning */
+    Size base_offset = (char *)fixed_data - (char *)header;
 
     /* Second pass: Copy data into reorganized layout */
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-        Datum value;
-        bool isnull;
+        Datum value = values_array[i];
+        bool isnull = isnull_array[i];
 
         if (att->attisdropped)
             continue;
 
-        value = slot_getattr(slot, i + 1, &isnull);
-
-        if (isnull)
+        if (hasnull && null_bitmap != NULL)
         {
-            /* Set the null bit for this column (0 = null) */
-            header->t_infomask |= HEAP_HASNULL;
-            /* Bit is already 0 from memset, so nothing to do */
-        }
-        else
-        {
-            /* Set the bit (1 = not null) */
-            null_bitmap[i >> 3] |= (1 << (i & 0x07));
+            if (isnull)
+            {
+                /* Bit is already 0 from memset, so nothing to do */
+            }
+            else
+            {
+                /* Set the bit (1 = not null) */
+                null_bitmap[i >> 3] |= (1 << (i & 0x07));
+            }
         }
 
         if (isnull)
@@ -627,7 +688,7 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
         }
         else
         {
-            /* Variable-length column - store offset and copy data */
+            /* Variable-length column - store absolute offset and copy data */
             Size varlen;
             if (att->attlen == -1)  /* varlena */
             {
@@ -639,11 +700,20 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                 varlen = strlen(DatumGetCString(value)) + 1;
                 memcpy(var_data + var_pos, DatumGetCString(value), varlen);
             }
-            var_offsets[var_col_index] = var_pos;
+
+            /* Store absolute offset from the start of tuple data */
+            var_offsets[var_col_index] = base_offset + MAXALIGN(fixed_data_len) + var_pos;
+
             var_pos += varlen;
             var_col_index++;
         }
     }
+
+    OPTIMIZED_LOG("Data copy completed: fixed_pos=%d, var_pos=%d", fixed_pos, var_pos);
+
+    /* Free the temporary arrays */
+    pfree(isnull_array);
+    pfree(values_array);
 
     /* Get a buffer to insert the tuple */
     buffer = RelationGetBufferForTuple(relation, len, InvalidBuffer, options,
@@ -665,6 +735,9 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
     /* Update tuple's self pointer */
     ItemPointerSet(&tuple->t_self, BufferGetBlockNumber(buffer), offnum);
+
+    OPTIMIZED_LOG("Tuple inserted successfully: block=%u, offset=%u",
+                  BufferGetBlockNumber(buffer), offnum);
 
     /* Mark the buffer dirty */
     MarkBufferDirty(buffer);

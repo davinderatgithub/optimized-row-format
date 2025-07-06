@@ -356,8 +356,27 @@ The extension implements several optimizations:
 - pageinspect can be used to phsycally validate the row format
 
 ## Todo
-- Fetching only the column needed.
+[2025-07-06]
+- Support for columns with NULL values
+- clarify if the NULL bitmap is stored everytime or only at the time of if a null value is present?
+- crashing due to null value
+postgres=# INSERT INTO test_table VALUES (1, null, 100, true);
+INSERT 0 1
+postgres=# select * from test_table ;
+ERROR:  invalid memory alloc request size 18446744073709551613
 
+
+## important commands
+# Clean previous build
+make distclean
+
+# Configure with explicit debug flags
+CFLAGS="-g -O0" ./configure \
+  --enable-debug \
+  --enable-cassert \
+  --prefix=/Users/davindersingh/personal/postgres/build \
+  --without-icu \
+  --with-pgport=5432
 
 ## Development
 
@@ -365,7 +384,7 @@ This extension is part of the PostgreSQL contrib modules. To contribute:
 
 1. Fork the PostgreSQL repository
 2. Make your changes in the contrib/optimized_storage directory
-3. Submit a patch to the PostgreSQL mailing list
+3. Submit a patch on the repository
 
 ## License
 
