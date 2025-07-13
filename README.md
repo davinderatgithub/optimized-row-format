@@ -356,7 +356,7 @@ The extension implements several optimizations:
 - pageinspect can be used to phsycally validate the row format
 
 ## Todo
-[2025-07-06]
+[2025-07-06] - Fixed
 - Support for columns with NULL values
 - clarify if the NULL bitmap is stored everytime or only at the time of if a null value is present?
 - crashing due to null value
@@ -364,6 +364,12 @@ postgres=# INSERT INTO test_table VALUES (1, null, 100, true);
 INSERT 0 1
 postgres=# select * from test_table ;
 ERROR:  invalid memory alloc request size 18446744073709551613
+
+- issue related to primary key
+'''
+postgres=# CREATE TABLE test_table (                                                                                           id integer  PRIMARY KEY,                                                                                                   name text,                                                                                                                 value bigint,                                                                                                              flag boolean                                                                                                           ) USING optimized_row_format;
+ERROR:  only heap AM is supported
+'''
 
 
 ## important commands
