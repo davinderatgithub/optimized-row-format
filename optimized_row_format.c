@@ -38,7 +38,7 @@ PG_MODULE_MAGIC;
  * This allows us to control logging independently of PostgreSQL's general debug level
  */
 #define OPTIMIZED_LOG(fmt, ...) \
-    elog(NOTICE, "[OPTIMIZED_ROW_FORMAT] " fmt, ##__VA_ARGS__)
+    /* Debug logging disabled for production */
 
 /*
  * Optimized Storage Format
@@ -200,6 +200,16 @@ static const TupleTableSlotOps *optimized_slot_callbacks(Relation relation);
 /* Caching is disabled for now to fix projection. */
 /* static OptimizedColumnMapCache *build_column_cache(TupleDesc tupleDesc); */
 
+/* Index Scan Functions */
+static IndexFetchTableData *optimized_index_fetch_begin(Relation rel);
+static void optimized_index_fetch_reset(IndexFetchTableData *scan);
+static void optimized_index_fetch_end(IndexFetchTableData *scan);
+static bool optimized_index_fetch_tuple(struct IndexFetchTableData *scan,
+                                      ItemPointer tid,
+                                      Snapshot snapshot,
+                                      TupleTableSlot *slot,
+                                      bool *call_again, bool *all_dead);
+
 /* Table access method handler */
 static bool optimized_tableam_initialized = false;
 
@@ -226,9 +236,15 @@ optimized_row_format_tableam_handler(PG_FUNCTION_ARGS)
 		optimized_tableam.scan_rescan = optimized_scan_rescan;
 		optimized_tableam.scan_getnextslot = optimized_scan_getnextslot;
 		optimized_tableam.parallelscan_estimate = optimized_parallelscan_estimate;
-		optimized_tableam.tuple_insert = optimized_tuple_insert;
+		                optimized_tableam.tuple_insert = optimized_tuple_insert;
 		optimized_tableam.relation_needs_toast_table = optimized_relation_needs_toast_table;
 		optimized_tableam.slot_callbacks = optimized_slot_callbacks;
+
+		/* Index scan functions */
+		optimized_tableam.index_fetch_begin = optimized_index_fetch_begin;
+		optimized_tableam.index_fetch_reset = optimized_index_fetch_reset;
+		optimized_tableam.index_fetch_end = optimized_index_fetch_end;
+		optimized_tableam.index_fetch_tuple = optimized_index_fetch_tuple;
 
 		optimized_tableam_initialized = true;
 	}
@@ -596,14 +612,16 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 	int i;
 
 	/*
-	 * The custom extraction logic in optimized_extract_attribute is faulty
-	 * as it assumes a different on-disk format. To prevent the segfault,
-	 * we revert to calling the safe, standard slot_getattr for all columns.
+	 * Use our custom getattr function to extract attributes from the
+	 * optimized format. This avoids circular dependencies and ensures
+	 * we're using the correct extraction logic for our custom format.
 	 */
 	for (i = 1; i <= natts; i++)
 	{
-		(void) slot_getattr(slot, i, &slot->tts_isnull[i - 1]);
+		slot->tts_values[i - 1] = optimized_getattr_for_slot(slot, i, &slot->tts_isnull[i - 1]);
 	}
+	
+	slot->tts_nvalid = natts;
 }
 
 static Datum
@@ -616,20 +634,20 @@ optimized_getattr_for_slot(TupleTableSlot *slot, int attnum, bool *isnull)
 	Form_pg_attribute att;
 
 	/*
-	 * This is the true definitive fix. The previous fixes missed this path.
-	 * When the executor uses the slot-based API (after our tts_ops swap),
-	 * it calls this function. This function was calling heap_getattr but was
-	 * failing to detoast the returned datum for variable-length columns,
-	 * which was the same bug that previously existed in the table-am-level
-	 * optimized_getattr. Adding the detoasting logic here fixes the crash
-	 * during filter evaluation on varlenas when using the slot API.
+	 * Use our custom optimized_extract_attribute function to read data
+	 * from the optimized tuple format. This is the correct approach since
+	 * our tuples are stored in optimized format, not standard heap format.
 	 */
-	att = TupleDescAttr(tupleDesc, attnum - 1);
-	datum = heap_getattr(tuple, attnum, tupleDesc, isnull);
+	datum = optimized_extract_attribute(tuple, attnum, tupleDesc, isnull);
 
-	if (!*isnull && att->attlen == -1)
+	/* Detoast variable-length columns if needed */
+	if (!*isnull)
 	{
-		datum = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(datum)));
+		att = TupleDescAttr(tupleDesc, attnum - 1);
+		if (att->attlen == -1)
+		{
+			datum = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(datum)));
+		}
 	}
 
 	return datum;
@@ -685,13 +703,17 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     isnull_array = (bool *) palloc0(tupdesc->natts * sizeof(bool));
     values_array = (Datum *) palloc(tupdesc->natts * sizeof(Datum));
 
+    /* Get the heap tuple from slot for direct extraction */
+    HeapTuple heap_tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
+    
     /* First pass: Check for nulls and count columns */
     for (i = 0; i < tupdesc->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
         if (!att->attisdropped)
         {
-            values_array[i] = slot_getattr(slot, i + 1, &isnull_array[i]);
+            /* Use heap_getattr to extract from heap format data */
+            values_array[i] = heap_getattr(heap_tuple, i + 1, tupdesc, &isnull_array[i]);
             if (isnull_array[i])
             {
                 hasnull = true;
@@ -1179,16 +1201,46 @@ static const TupleTableSlotOps *
 optimized_slot_callbacks(Relation relation)
 {
 	/*
-	 * For INSERT operations, the executor needs to store a heap tuple in the
-	 * slot. This requires a compatible slot type (TTSOpsHeapTuple or
-	 * TTSOpsBufferHeapTuple). Returning our custom TTSOpsOptimized breaks
-	 * this contract and causes the "wrong type of slot" error.
-	 *
-	 * By returning TTSOpsHeapTuple here, we ensure that INSERT works correctly.
-	 * This disables the custom getsomeattrs projection logic for now, which
-	 * will need to be re-enabled in a different way (e.g., by swapping
-	 * the ops within the scan_getnextslot function). This change fixes the
-	 * immediate insertion bug.
+	 * Return our custom TupleTableSlotOps so that when PostgreSQL reads
+	 * tuples from our optimized format, it uses our custom getsomeattrs
+	 * function that knows how to extract data from the optimized format.
+	 * 
+	 * This fixes the write/read format mismatch where tuples were being
+	 * written in optimized format but read using standard heap operations.
 	 */
-	return &TTSOpsHeapTuple;
+	return &TTSOpsOptimized;
+}
+
+/* --- Index Scan Implementation --- */
+
+static IndexFetchTableData *
+optimized_index_fetch_begin(Relation rel)
+{
+	const TableAmRoutine *heap_am = get_heap_am_routine();
+	return heap_am->index_fetch_begin(rel);
+}
+
+static void
+optimized_index_fetch_reset(IndexFetchTableData *scan)
+{
+	const TableAmRoutine *heap_am = get_heap_am_routine();
+	heap_am->index_fetch_reset(scan);
+}
+
+static void
+optimized_index_fetch_end(IndexFetchTableData *scan)
+{
+	const TableAmRoutine *heap_am = get_heap_am_routine();
+	heap_am->index_fetch_end(scan);
+}
+
+static bool
+optimized_index_fetch_tuple(struct IndexFetchTableData *scan,
+                              ItemPointer tid,
+                              Snapshot snapshot,
+                              TupleTableSlot *slot,
+                              bool *call_again, bool *all_dead)
+{
+	const TableAmRoutine *heap_am = get_heap_am_routine();
+	return heap_am->index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead);
 }

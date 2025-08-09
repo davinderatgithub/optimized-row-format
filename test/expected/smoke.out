@@ -1,0 +1,26 @@
+-- Minimal Smoke Test for Optimized Row Format
+-- This script performs a quick, essential check of the extension's functionality.
+
+-- Create the extension if it doesn't exist
+CREATE EXTENSION IF NOT EXISTS optimized_row_format;
+-- Create a test table using the optimized format
+CREATE TABLE smoke_test_optimized (
+    id INTEGER,
+    name TEXT,
+    value BIGINT,
+    flag BOOLEAN
+) USING optimized_row_format;
+-- Test 1: Data insertion
+INSERT INTO smoke_test_optimized VALUES (1, 'first', 100, true);
+INSERT INTO smoke_test_optimized VALUES (2, 'second', 200, false);
+-- Test 2: Data selection
+-- This confirms that the scan function can read back the data correctly.
+SELECT * FROM smoke_test_optimized ORDER BY id;
+ id |  name  | value | flag 
+----+--------+-------+------
+  1 | first  |   100 | t
+  2 | second |   200 | f
+(2 rows)
+
+-- Cleanup
+DROP TABLE smoke_test_optimized;

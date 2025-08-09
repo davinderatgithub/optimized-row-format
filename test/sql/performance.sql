@@ -1,0 +1,339 @@
+-- Consolidated Performance Test for Optimized Row Format
+-- This script combines benchmarks from benchmark.sql and many_columns_test.sql
+-- into a single, comprehensive suite.
+
+\timing on
+
+-- Create the extension if it doesn't exist
+\echo '=== Creating optimized_row_format extension ==='
+CREATE EXTENSION IF NOT EXISTS optimized_row_format;
+
+-- Verify extension is available
+\echo '=== Verifying extension availability ==='
+SELECT
+    CASE
+        WHEN EXISTS (
+            SELECT 1 FROM pg_am WHERE amname = 'optimized_row_format'
+        ) THEN '✅ Extension is available'
+        ELSE '❌ Extension is NOT available - tests will fail'
+    END as extension_status;
+
+-- Clean up previous tables to ensure a fresh run
+\echo '=== Cleaning up previous test tables ==='
+DROP TABLE IF EXISTS test_heap_mixed;
+DROP TABLE IF EXISTS test_optimized_mixed;
+DROP TABLE IF EXISTS test_heap_nulls;
+DROP TABLE IF EXISTS test_optimized_nulls;
+DROP TABLE IF EXISTS test_heap_fixed;
+DROP TABLE IF EXISTS test_optimized_fixed;
+DROP TABLE IF EXISTS test_heap_var;
+DROP TABLE IF EXISTS test_optimized_var;
+DROP TABLE IF EXISTS heap_many_cols;
+DROP TABLE IF EXISTS optimized_many_cols;
+
+
+\echo '=== SECTION 1: GENERAL PERFORMANCE BENCHMARKS ==='
+
+\echo '--- Setting up general performance test tables ---'
+-- General purpose table with mixed data types
+CREATE TABLE test_heap_mixed (
+    id SERIAL PRIMARY KEY,
+    small_int SMALLINT,
+    regular_int INTEGER,
+    big_int BIGINT,
+    text_col TEXT,
+    varchar_col VARCHAR(100),
+    float_col REAL,
+    double_col DOUBLE PRECISION,
+    bool_col BOOLEAN,
+    date_col DATE,
+    timestamp_col TIMESTAMP,
+    json_col JSONB
+);
+
+CREATE TABLE test_optimized_mixed (
+    id SERIAL PRIMARY KEY,
+    small_int SMALLINT,
+    regular_int INTEGER,
+    big_int BIGINT,
+    text_col TEXT,
+    varchar_col VARCHAR(100),
+    float_col REAL,
+    double_col DOUBLE PRECISION,
+    bool_col BOOLEAN,
+    date_col DATE,
+    timestamp_col TIMESTAMP,
+    json_col JSONB
+) USING optimized_row_format;
+
+-- Table for NULL handling tests
+CREATE TABLE test_heap_nulls (
+    id SERIAL PRIMARY KEY,
+    col1 INTEGER,
+    col2 TEXT,
+    col3 INTEGER,
+    col4 TEXT,
+    col5 INTEGER
+);
+
+CREATE TABLE test_optimized_nulls (
+    id SERIAL PRIMARY KEY,
+    col1 INTEGER,
+    col2 TEXT,
+    col3 INTEGER,
+    col4 TEXT,
+    col5 INTEGER
+) USING optimized_row_format;
+
+
+\echo '--- Test 1.1: INSERT Performance (Mixed Data Types) ---'
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+    i INTEGER;
+BEGIN
+    -- Test heap format
+    start_time := clock_timestamp();
+    FOR i IN 1..10000 LOOP
+        INSERT INTO test_heap_mixed (small_int, regular_int, big_int, text_col, varchar_col,
+                              float_col, double_col, bool_col, date_col, timestamp_col, json_col)
+        VALUES (
+            (i % 32767)::SMALLINT, i, i::BIGINT * 1000,
+            'This is a test text column for row ' || i, 'Varchar content ' || i,
+            i * 1.5, i * 2.5, (i % 2)::BOOLEAN, CURRENT_DATE + (i % 365),
+            CURRENT_TIMESTAMP + (i || ' seconds')::INTERVAL,
+            ('{"key": "value", "number": ' || i || '}')::JSONB
+        );
+    END LOOP;
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    -- Test optimized format
+    start_time := clock_timestamp();
+    FOR i IN 1..10000 LOOP
+        INSERT INTO test_optimized_mixed (small_int, regular_int, big_int, text_col, varchar_col,
+                                   float_col, double_col, bool_col, date_col, timestamp_col, json_col)
+        VALUES (
+            (i % 32767)::SMALLINT, i, i::BIGINT * 1000,
+            'This is a test text column for row ' || i, 'Varchar content ' || i,
+            i * 1.5, i * 2.5, (i % 2)::BOOLEAN, CURRENT_DATE + (i % 365),
+            CURRENT_TIMESTAMP + (i || ' seconds')::INTERVAL,
+            ('{"key": "value", "number": ' || i || '}')::JSONB
+        );
+    END LOOP;
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'INSERT Performance (10,000 mixed-type rows):';
+    RAISE NOTICE '  Heap format: %', heap_time;
+    RAISE NOTICE '  Optimized format: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '--- Test 1.2: SELECT Performance (Mixed Data Types) ---'
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+    result_count INTEGER;
+BEGIN
+    -- Test heap format
+    start_time := clock_timestamp();
+    SELECT COUNT(*) INTO result_count FROM test_heap_mixed WHERE regular_int % 2 = 0;
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    -- Test optimized format
+    start_time := clock_timestamp();
+    SELECT COUNT(*) INTO result_count FROM test_optimized_mixed WHERE regular_int % 2 = 0;
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'SELECT Performance (fixed-length column):';
+    RAISE NOTICE '  Heap format: %', heap_time;
+    RAISE NOTICE '  Optimized format: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '--- Test 1.3: NULL Handling Performance ---'
+-- Insert data with various null patterns
+INSERT INTO test_heap_nulls (col1, col2, col3, col4, col5)
+SELECT
+    CASE WHEN i % 2 = 0 THEN NULL ELSE i END,
+    CASE WHEN i % 3 = 0 THEN NULL ELSE 'text' || i END,
+    CASE WHEN i % 4 = 0 THEN NULL ELSE i * 2 END,
+    CASE WHEN i % 5 = 0 THEN NULL ELSE 'varchar' || i END,
+    CASE WHEN i % 6 = 0 THEN NULL ELSE i * 3 END
+FROM generate_series(1, 5000) i;
+
+INSERT INTO test_optimized_nulls (col1, col2, col3, col4, col5)
+SELECT
+    CASE WHEN i % 2 = 0 THEN NULL ELSE i END,
+    CASE WHEN i % 3 = 0 THEN NULL ELSE 'text' || i END,
+    CASE WHEN i % 4 = 0 THEN NULL ELSE i * 2 END,
+    CASE WHEN i % 5 = 0 THEN NULL ELSE 'varchar' || i END,
+    CASE WHEN i % 6 = 0 THEN NULL ELSE i * 3 END
+FROM generate_series(1, 5000) i;
+
+-- Test NULL checking performance
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+    result_count INTEGER;
+BEGIN
+    -- Test heap format
+    start_time := clock_timestamp();
+    SELECT COUNT(*) INTO result_count FROM test_heap_nulls WHERE col1 IS NULL OR col3 IS NULL;
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    -- Test optimized format
+    start_time := clock_timestamp();
+    SELECT COUNT(*) INTO result_count FROM test_optimized_nulls WHERE col1 IS NULL OR col3 IS NULL;
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'NULL Checking Performance:';
+    RAISE NOTICE '  Heap format: %', heap_time;
+    RAISE NOTICE '  Optimized format: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '=== SECTION 2: MANY-COLUMN PERFORMANCE BENCHMARKS ==='
+
+\echo '--- Setting up many-column test tables (100 columns) ---'
+
+CREATE TABLE heap_many_cols (
+    col1 INTEGER, col2 INTEGER, col3 INTEGER, col4 INTEGER, col5 INTEGER, col6 INTEGER, col7 INTEGER, col8 INTEGER, col9 INTEGER, col10 INTEGER,
+    col11 INTEGER, col12 INTEGER, col13 INTEGER, col14 INTEGER, col15 INTEGER, col16 INTEGER, col17 INTEGER, col18 INTEGER, col19 INTEGER, col20 INTEGER,
+    col21 INTEGER, col22 INTEGER, col23 INTEGER, col24 INTEGER, col25 INTEGER, col26 INTEGER, col27 INTEGER, col28 INTEGER, col29 INTEGER, col30 INTEGER,
+    col31 INTEGER, col32 INTEGER, col33 INTEGER, col34 INTEGER, col35 INTEGER, col36 INTEGER, col37 INTEGER, col38 INTEGER, col39 INTEGER, col40 INTEGER,
+    col41 INTEGER, col42 INTEGER, col43 INTEGER, col44 INTEGER, col45 INTEGER, col46 INTEGER, col47 INTEGER, col48 INTEGER, col49 INTEGER, col50 INTEGER,
+    col51 TEXT, col52 TEXT, col53 TEXT, col54 TEXT, col55 TEXT, col56 TEXT, col57 TEXT, col58 TEXT, col59 TEXT, col60 TEXT,
+    col61 TEXT, col62 TEXT, col63 TEXT, col64 TEXT, col65 TEXT, col66 TEXT, col67 TEXT, col68 TEXT, col69 TEXT, col70 TEXT,
+    col71 TEXT, col72 TEXT, col73 TEXT, col74 TEXT, col75 TEXT, col76 TEXT, col77 TEXT, col78 TEXT, col79 TEXT, col80 TEXT,
+    col81 TEXT, col82 TEXT, col83 TEXT, col84 TEXT, col85 TEXT, col86 TEXT, col87 TEXT, col88 TEXT, col89 TEXT, col90 TEXT,
+    col91 TEXT, col92 TEXT, col93 TEXT, col94 TEXT, col95 TEXT, col96 TEXT, col97 TEXT, col98 TEXT, col99 TEXT, col100 TEXT
+);
+
+CREATE TABLE optimized_many_cols (
+    col1 INTEGER, col2 INTEGER, col3 INTEGER, col4 INTEGER, col5 INTEGER, col6 INTEGER, col7 INTEGER, col8 INTEGER, col9 INTEGER, col10 INTEGER,
+    col11 INTEGER, col12 INTEGER, col13 INTEGER, col14 INTEGER, col15 INTEGER, col16 INTEGER, col17 INTEGER, col18 INTEGER, col19 INTEGER, col20 INTEGER,
+    col21 INTEGER, col22 INTEGER, col23 INTEGER, col24 INTEGER, col25 INTEGER, col26 INTEGER, col27 INTEGER, col28 INTEGER, col29 INTEGER, col30 INTEGER,
+    col31 INTEGER, col32 INTEGER, col33 INTEGER, col34 INTEGER, col35 INTEGER, col36 INTEGER, col37 INTEGER, col38 INTEGER, col39 INTEGER, col40 INTEGER,
+    col41 INTEGER, col42 INTEGER, col43 INTEGER, col44 INTEGER, col45 INTEGER, col46 INTEGER, col47 INTEGER, col48 INTEGER, col49 INTEGER, col50 INTEGER,
+    col51 TEXT, col52 TEXT, col53 TEXT, col54 TEXT, col55 TEXT, col56 TEXT, col57 TEXT, col58 TEXT, col59 TEXT, col60 TEXT,
+    col61 TEXT, col62 TEXT, col63 TEXT, col64 TEXT, col65 TEXT, col66 TEXT, col67 TEXT, col68 TEXT, col69 TEXT, col70 TEXT,
+    col71 TEXT, col72 TEXT, col73 TEXT, col74 TEXT, col75 TEXT, col76 TEXT, col77 TEXT, col78 TEXT, col79 TEXT, col80 TEXT,
+    col81 TEXT, col82 TEXT, col83 TEXT, col84 TEXT, col85 TEXT, col86 TEXT, col87 TEXT, col88 TEXT, col89 TEXT, col90 TEXT,
+    col91 TEXT, col92 TEXT, col93 TEXT, col94 TEXT, col95 TEXT, col96 TEXT, col97 TEXT, col98 TEXT, col99 TEXT, col100 TEXT
+) USING optimized_row_format;
+
+
+\echo '--- Test 2.1: INSERT Performance (10,000 many-column rows) ---'
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+    i INTEGER;
+BEGIN
+    start_time := clock_timestamp();
+    INSERT INTO heap_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    start_time := clock_timestamp();
+    INSERT INTO optimized_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'INSERT Performance (10,000 many-column rows):';
+    RAISE NOTICE '  Heap format: %', heap_time;
+    RAISE NOTICE '  Optimized format: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '--- Test 2.2: Single Column SELECT (Fixed-length) ---'
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+BEGIN
+    start_time := clock_timestamp();
+    PERFORM COUNT(*) FROM heap_many_cols WHERE col10 > 5000;
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    start_time := clock_timestamp();
+    PERFORM COUNT(*) FROM optimized_many_cols WHERE col10 > 5000;
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'SELECT col10 (fixed-length):';
+    RAISE NOTICE '  Heap: %', heap_time;
+    RAISE NOTICE '  Optimized: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '--- Test 2.3: Single Column SELECT (Variable-length) ---'
+DO $$
+DECLARE
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+    heap_time INTERVAL;
+    optimized_time INTERVAL;
+BEGIN
+    start_time := clock_timestamp();
+    PERFORM COUNT(*) FROM heap_many_cols WHERE col70 LIKE '%100%';
+    end_time := clock_timestamp();
+    heap_time := end_time - start_time;
+
+    start_time := clock_timestamp();
+    PERFORM COUNT(*) FROM optimized_many_cols WHERE col70 LIKE '%100%';
+    end_time := clock_timestamp();
+    optimized_time := end_time - start_time;
+
+    RAISE NOTICE 'SELECT col70 (variable-length):';
+    RAISE NOTICE '  Heap: %', heap_time;
+    RAISE NOTICE '  Optimized: %', optimized_time;
+    RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+END $$;
+
+
+\echo '=== SECTION 3: STORAGE EFFICIENCY ==='
+
+\echo '--- Final Storage Comparison ---'
+SELECT
+    'General Mixed-Type' as test_case,
+    pg_size_pretty(pg_total_relation_size('test_heap_mixed')) as heap_size,
+    pg_size_pretty(pg_total_relation_size('test_optimized_mixed')) as optimized_size
+UNION ALL
+SELECT
+    'NULL-heavy' as test_case,
+    pg_size_pretty(pg_total_relation_size('test_heap_nulls')) as heap_size,
+    pg_size_pretty(pg_total_relation_size('test_optimized_nulls')) as optimized_size
+UNION ALL
+SELECT
+    'Many Columns' as test_case,
+    pg_size_pretty(pg_total_relation_size('heap_many_cols')) as heap_size,
+    pg_size_pretty(pg_total_relation_size('optimized_many_cols')) as optimized_size;
+
+
+\echo '=== Benchmark Complete ==='
