@@ -69,7 +69,11 @@ for (i = 1; i <= natts; i++)
 - `bigint` value 100 read as 138,542,760,067,072 (wrong memory location)
 - Same attribute extracted multiple times per tuple (performance + corruption)
 
-**Impact**: All SELECT operations return corrupted data, making the extension completely non-functional.
+**Impact**: All SELECT operations either:
+1. Return corrupted data (when they don't crash)
+2. **CRASH with memory allocation errors** (`invalid memory alloc request size 18446744073709551613`)
+
+The extension is completely non-functional and poses system stability risks.
 
 ## Technical Specifications for Fixes
 
@@ -138,9 +142,10 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 
 ## Risk Assessment
 
-**CRITICAL RISK**: Data corruption makes extension completely non-functional
-- All SELECT operations return garbage data
-- Extension cannot be used for any purpose until fixed
+**CRITICAL RISK**: Data corruption AND memory allocation failures make extension completely non-functional
+- All SELECT operations either return garbage data OR crash the backend
+- Memory allocation request of 18,446,744,073,709,551,613 bytes (near UINT64_MAX) indicates severe integer overflow
+- Extension poses system stability risks and cannot be used for any purpose until fixed
 
 **High Risk**: Performance regression makes extension unusable for production
 - Even if data corruption is fixed, performance is 1000x slower than heap

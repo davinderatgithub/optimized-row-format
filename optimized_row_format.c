@@ -369,18 +369,33 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
 					 */
 					HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 					
-					/* Clear the slot first */
+					/* Materialize a standard heap tuple into the slot for executor compatibility */
 					ExecClearTuple(slot);
 					
-					/* Manually store the tuple data while preserving our custom operations */
-					slot->tts_nvalid = 0;
-					hslot->tuple = tuple;
-					hslot->off = 0;
-					slot->tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
-					slot->tts_tid = tuple->t_self;
-					slot->tts_tableOid = tuple->t_tableOid;
+					TupleDesc tupdesc = scan->rs_rd->rd_att;
+					int natts = tupdesc->natts;
+					Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
+					bool *isnull = (bool *) palloc0(natts * sizeof(bool));
 					
-					/* Don't set TTS_FLAG_SHOULDFREE since we don't own the tuple */
+					for (int i = 0; i < natts; i++)
+					{
+						values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, &isnull[i]);
+						if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
+						{
+							values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
+						}
+					}
+					
+					HeapTuple htup = heap_form_tuple(tupdesc, values, isnull);
+					pfree(values);
+					pfree(isnull);
+					
+					ExecStoreHeapTuple(htup, slot, true);
+					
+					/* Advance offset for next call */
+					oscan->currOffset++;
+					LockBuffer(oscan->currBuffer, BUFFER_LOCK_UNLOCK);
+					return true;
 
 					/* Advance offset for next call */
 					oscan->currOffset++;
@@ -1081,11 +1096,50 @@ static void optimized_slot_materialize(TupleTableSlot *slot)
 	hslot->off = 0;
 	
 	if (!hslot->tuple)
+	{
+		/* No tuple yet, create from values/isnull arrays */
 		hslot->tuple = heap_form_tuple(slot->tts_tupleDescriptor,
 									   slot->tts_values,
 									   slot->tts_isnull);
+	}
 	else
-		hslot->tuple = heap_copytuple(hslot->tuple);
+	{
+		/*
+		 * CRITICAL FIX: We have an optimized format tuple, but materialization
+		 * means we need a standard heap tuple (e.g., for ORDER BY operations).
+		 * Convert optimized format to standard heap format.
+		 */
+		TupleDesc tupdesc = slot->tts_tupleDescriptor;
+		int natts = tupdesc->natts;
+		Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
+		bool *isnull = (bool *) palloc0(natts * sizeof(bool));
+		
+		/* Extract each attribute from optimized format */
+		for (int i = 0; i < natts; i++)
+		{
+			values[i] = optimized_extract_attribute(hslot->tuple, i + 1, tupdesc, &isnull[i]);
+			
+			/* Handle detoasting for variable-length attributes */
+			if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
+			{
+				values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
+			}
+		}
+		
+		/* Create a new standard heap tuple from the extracted values */
+		HeapTuple heap_tuple = heap_form_tuple(tupdesc, values, isnull);
+		
+		/* Copy tuple metadata */
+		heap_tuple->t_self = hslot->tuple->t_self;
+		heap_tuple->t_tableOid = hslot->tuple->t_tableOid;
+		
+		/* Replace the optimized tuple with the standard heap tuple */
+		hslot->tuple = heap_tuple;
+		
+		/* Clean up */
+		pfree(values);
+		pfree(isnull);
+	}
 	
 	slot->tts_flags |= TTS_FLAG_SHOULDFREE;
 	
@@ -1131,6 +1185,65 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 	if (!hslot->tuple)
 		optimized_slot_materialize(slot);
 	
+	/*
+	 * CRITICAL FIX: ORDER BY operations call this function expecting standard heap format.
+	 * We need to convert optimized format tuples to standard heap format, but only
+	 * when the tuple actually comes from our optimized table (not from INSERT operations).
+	 * 
+	 * Detection strategy: Check if the tuple's table uses optimized_row_format AM.
+	 */
+	
+	/* Check if this tuple came from an optimized table */
+	bool is_optimized_table = false;
+	if (hslot->tuple && hslot->tuple->t_tableOid != InvalidOid)
+	{
+		Relation rel = try_relation_open(hslot->tuple->t_tableOid, NoLock);
+		if (rel != NULL)
+		{
+			/* Check if the table uses a non-heap access method (i.e., our optimized AM) */
+			if (rel->rd_tableam != get_heap_am_routine())
+			{
+				is_optimized_table = true;
+			}
+			relation_close(rel, NoLock);
+		}
+	}
+	
+	if (is_optimized_table)
+	{
+		/* This tuple is from an optimized table - convert to standard heap format */
+		TupleDesc tupdesc = slot->tts_tupleDescriptor;
+		int natts = tupdesc->natts;
+		Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
+		bool *isnull = (bool *) palloc0(natts * sizeof(bool));
+		
+		/* Extract each attribute from optimized format */
+		for (int i = 0; i < natts; i++)
+		{
+			values[i] = optimized_extract_attribute(hslot->tuple, i + 1, tupdesc, &isnull[i]);
+			
+			/* Handle detoasting for variable-length attributes */
+			if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
+			{
+				values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
+			}
+		}
+		
+		/* Create a new standard heap tuple from the extracted values */
+		HeapTuple heap_tuple = heap_form_tuple(tupdesc, values, isnull);
+		
+		/* Copy tuple metadata */
+		heap_tuple->t_self = hslot->tuple->t_self;
+		heap_tuple->t_tableOid = hslot->tuple->t_tableOid;
+		
+		/* Clean up */
+		pfree(values);
+		pfree(isnull);
+		
+		return heap_tuple;
+	}
+	
+	/* This tuple is already in standard heap format */
 	return hslot->tuple;
 }
 
@@ -1142,17 +1255,68 @@ static HeapTuple optimized_slot_copy_heap_tuple(TupleTableSlot *slot)
 	if (!hslot->tuple)
 		optimized_slot_materialize(slot);
 	
+	/*
+	 * Same logic as get_heap_tuple: check if tuple is from optimized table.
+	 */
+	bool is_optimized_table = false;
+	if (hslot->tuple && hslot->tuple->t_tableOid != InvalidOid)
+	{
+		Relation rel = try_relation_open(hslot->tuple->t_tableOid, NoLock);
+		if (rel != NULL)
+		{
+			/* Non-heap AM implies our optimized AM for this table */
+			if (rel->rd_tableam != get_heap_am_routine())
+			{
+				is_optimized_table = true;
+			}
+			relation_close(rel, NoLock);
+		}
+	}
+	
+	if (is_optimized_table)
+	{
+		/* Convert optimized format tuple to standard heap format, then copy */
+		HeapTuple converted = optimized_slot_get_heap_tuple(slot);
+		return heap_copytuple(converted);
+	}
+	
 	return heap_copytuple(hslot->tuple);
 }
 
 static MinimalTuple optimized_slot_copy_minimal_tuple(TupleTableSlot *slot)
 {
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+	MemoryContext oldcontext;
 	
-	if (!hslot->tuple)
-		optimized_slot_materialize(slot);
+	Assert(!TTS_EMPTY(slot));
 	
-	return minimal_tuple_from_heap_tuple(hslot->tuple);
+	oldcontext = MemoryContextSwitchTo(slot->tts_mcxt);
+	
+	TupleDesc tupdesc = slot->tts_tupleDescriptor;
+	int natts = tupdesc->natts;
+	Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
+	bool *isnull = (bool *) palloc0(natts * sizeof(bool));
+	
+	/* Extract each attribute from optimized format */
+	for (int i = 0; i < natts; i++)
+	{
+		values[i] = optimized_extract_attribute(hslot->tuple, i + 1, tupdesc, &isnull[i]);
+		
+		/* Handle detoasting for variable-length attributes */
+		if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
+		{
+			values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
+		}
+	}
+	
+	/* Form a proper MinimalTuple in the slot memory context */
+	MinimalTuple mtup = heap_form_minimal_tuple(tupdesc, values, isnull);
+	
+	pfree(values);
+	pfree(isnull);
+	MemoryContextSwitchTo(oldcontext);
+	
+	return mtup;
 }
 
 static Datum optimized_slot_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
@@ -1208,7 +1372,7 @@ optimized_slot_callbacks(Relation relation)
 	 * This fixes the write/read format mismatch where tuples were being
 	 * written in optimized format but read using standard heap operations.
 	 */
-	return &TTSOpsOptimized;
+	return &TTSOpsHeapTuple;
 }
 
 /* --- Index Scan Implementation --- */

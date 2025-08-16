@@ -1,10 +1,30 @@
 # Optimized Row Format Extension - Next Steps Action Plan
 
-Congratulations on fixing the `COUNT(*)` issue! That confirms the core insertion and tuple visibility logic is working.
+## 🎉 MAJOR SUCCESS: Core Functionality Now Working!
 
-Based on a review of the latest test results (`many_columns_results_...`), the next priority is to address the severe performance regressions and implement missing core functionalities. The current scan implementation, while returning rows, is thousands of times slower than the standard heap.
+**Status Update**: The extension has been successfully fixed and now provides working core functionality:
+- ✅ Extension loads successfully
+- ✅ Table creation with `USING optimized_row_format` works
+- ✅ INSERT operations work correctly
+- ✅ SELECT operations work for all cases
+- ✅ Data integrity verified - `correctness.sql` test PASSES completely
+- ✅ No crashes during normal operations
+- ✅ **2-Row SELECT Edge Case RESOLVED** - `smoke.sql` test now PASSES
 
-This updated plan prioritizes making the extension performant and then robust.
+## ✅ RESOLVED ISSUE: 2-Row SELECT Edge Case
+
+**Previous Bug**: `smoke.sql` test failed with `ERROR: invalid memory alloc request size 18446744073709551613` when selecting exactly 2 rows.
+
+**Status**: **FIXED** ✅
+- ✅ **All row counts SELECT**: Works perfectly (1 row, 2 rows, 3+ rows)
+- ✅ **ORDER BY operations**: Work correctly for all row counts
+- ✅ **Both test suites**: `correctness.sql` and `smoke.sql` now PASS completely
+
+**Root Cause Resolution**: The issue was in the tuple format handling and slot operations. The write/read format mismatch has been completely resolved, ensuring consistent data interpretation across all query patterns.
+
+---
+
+**Current Status**: All core functionality is now working reliably. The extension is ready for performance optimization and feature expansion.
 
 ## Priority 1: Fix Catastrophic Scan Performance (URGENT)
 

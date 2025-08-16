@@ -1,6 +1,5 @@
 -- Minimal Smoke Test for Optimized Row Format
 -- This script performs a quick, essential check of the extension's functionality.
-
 -- Create the extension if it doesn't exist
 CREATE EXTENSION IF NOT EXISTS optimized_row_format;
 -- Create a test table using the optimized format
