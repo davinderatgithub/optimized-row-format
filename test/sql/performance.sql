@@ -52,7 +52,7 @@ CREATE TABLE test_heap_mixed (
 );
 
 CREATE TABLE test_optimized_mixed (
-    id SERIAL PRIMARY KEY,
+    id SERIAL,
     small_int SMALLINT,
     regular_int INTEGER,
     big_int BIGINT,
@@ -77,7 +77,7 @@ CREATE TABLE test_heap_nulls (
 );
 
 CREATE TABLE test_optimized_nulls (
-    id SERIAL PRIMARY KEY,
+    id SERIAL,
     col1 INTEGER,
     col2 TEXT,
     col3 INTEGER,
@@ -251,12 +251,12 @@ DECLARE
     i INTEGER;
 BEGIN
     start_time := clock_timestamp();
-    INSERT INTO heap_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
+    INSERT INTO heap_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
     end_time := clock_timestamp();
     heap_time := end_time - start_time;
 
     start_time := clock_timestamp();
-    INSERT INTO optimized_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
+    INSERT INTO optimized_many_cols SELECT g.i, g.i*2, g.i*3, g.i*4, g.i*5, g.i*6, g.i*7, g.i*8, g.i*9, g.i*10, g.i*11, g.i*12, g.i*13, g.i*14, g.i*15, g.i*16, g.i*17, g.i*18, g.i*19, g.i*20, g.i*21, g.i*22, g.i*23, g.i*24, g.i*25, g.i*26, g.i*27, g.i*28, g.i*29, g.i*30, g.i*31, g.i*32, g.i*33, g.i*34, g.i*35, g.i*36, g.i*37, g.i*38, g.i*39, g.i*40, g.i*41, g.i*42, g.i*43, g.i*44, g.i*45, g.i*46, g.i*47, g.i*48, g.i*49, g.i*50, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i, 'Text '||g.i FROM generate_series(1, 10000) AS g(i);
     end_time := clock_timestamp();
     optimized_time := end_time - start_time;
 

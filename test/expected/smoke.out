@@ -2,6 +2,7 @@
 -- This script performs a quick, essential check of the extension's functionality.
 -- Create the extension if it doesn't exist
 CREATE EXTENSION IF NOT EXISTS optimized_row_format;
+NOTICE:  extension "optimized_row_format" already exists, skipping
 -- Create a test table using the optimized format
 CREATE TABLE smoke_test_optimized (
     id INTEGER,

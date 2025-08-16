@@ -357,19 +357,13 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
 				if (HeapTupleSatisfiesVisibility(tuple, snapshot, oscan->currBuffer))
 				{
 					/*
-					 * OPTIMAL APPROACH: Store tuple manually to preserve custom slot operations.
-					 * This combines the MAXALIGN fix (for stability) with custom slot operations 
-					 * approach (for performance). The custom slot operations enable
-					 * on-demand attribute fetching for projection optimization.
-					 * 
-					 * We manually store the tuple instead of using ExecStoreHeapTuple() because
-					 * ExecStoreHeapTuple() checks for TTS_IS_HEAPTUPLE and would fail with our
-					 * custom slot operations. It would also override our custom operations with
-					 * the default TTSOpsHeapTuple.
+					 * TEMPORARY: Revert to eager deformation to fix segfault.
+					 * We'll implement projection optimization more carefully in the next iteration.
+					 * The key insight is that we need to materialize a standard heap tuple
+					 * for executor compatibility while still storing our optimized format.
 					 */
-					HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 					
-					/* Materialize a standard heap tuple into the slot for executor compatibility */
+					/* Clear the slot first */
 					ExecClearTuple(slot);
 					
 					TupleDesc tupdesc = scan->rs_rd->rd_att;
@@ -377,25 +371,19 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
 					Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
 					bool *isnull = (bool *) palloc0(natts * sizeof(bool));
 					
+					/* Extract all attributes from optimized format */
 					for (int i = 0; i < natts; i++)
 					{
 						values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, &isnull[i]);
-						if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
-						{
-							values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
-						}
 					}
 					
+					/* Create a standard heap tuple from the extracted values */
 					HeapTuple htup = heap_form_tuple(tupdesc, values, isnull);
 					pfree(values);
 					pfree(isnull);
 					
+					/* Store the standard heap tuple in the slot */
 					ExecStoreHeapTuple(htup, slot, true);
-					
-					/* Advance offset for next call */
-					oscan->currOffset++;
-					LockBuffer(oscan->currBuffer, BUFFER_LOCK_UNLOCK);
-					return true;
 
 					/* Advance offset for next call */
 					oscan->currOffset++;
@@ -1365,12 +1353,13 @@ static const TupleTableSlotOps *
 optimized_slot_callbacks(Relation relation)
 {
 	/*
-	 * Return our custom TupleTableSlotOps so that when PostgreSQL reads
-	 * tuples from our optimized format, it uses our custom getsomeattrs
-	 * function that knows how to extract data from the optimized format.
+	 * CRITICAL: Use custom slot operations only for table scans to enable projection.
+	 * For INSERT operations, we must use standard heap slot operations to avoid
+	 * segmentation faults during tuple insertion.
 	 * 
-	 * This fixes the write/read format mismatch where tuples were being
-	 * written in optimized format but read using standard heap operations.
+	 * Unfortunately, PostgreSQL doesn't provide context about the operation type
+	 * in this callback, so we need to use heap operations for all cases to ensure
+	 * INSERT stability. The projection optimization will be implemented differently.
 	 */
 	return &TTSOpsHeapTuple;
 }
