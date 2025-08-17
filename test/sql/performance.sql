@@ -77,7 +77,7 @@ CREATE TABLE test_heap_nulls (
 );
 
 CREATE TABLE test_optimized_nulls (
-    id SERIAL,
+    id INTEGER,
     col1 INTEGER,
     col2 TEXT,
     col3 INTEGER,
@@ -173,8 +173,9 @@ SELECT
     CASE WHEN i % 6 = 0 THEN NULL ELSE i * 3 END
 FROM generate_series(1, 5000) i;
 
-INSERT INTO test_optimized_nulls (col1, col2, col3, col4, col5)
+INSERT INTO test_optimized_nulls (id, col1, col2, col3, col4, col5)
 SELECT
+    i,
     CASE WHEN i % 2 = 0 THEN NULL ELSE i END,
     CASE WHEN i % 3 = 0 THEN NULL ELSE 'text' || i END,
     CASE WHEN i % 4 = 0 THEN NULL ELSE i * 2 END,

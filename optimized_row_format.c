@@ -166,6 +166,14 @@ typedef struct OptimizedScanDescData
 
 typedef OptimizedScanDescData *OptimizedScanDesc;
 
+/* Custom tuple table slot for optimized row format with projection optimization */
+typedef struct OptimizedTupleTableSlot
+{
+	TupleTableSlot base;		/* Base slot structure */
+	HeapTuple opt_tuple;		/* The optimized tuple data */
+	bool *attr_cached;			/* Track which attributes have been extracted */
+} OptimizedTupleTableSlot;
+
 /* Get the heap AM routine to delegate operations to */
 static const TableAmRoutine *
 get_heap_am_routine(void)
@@ -324,6 +332,14 @@ optimized_scan_rescan(TableScanDesc scan, ScanKey key, bool set_params,
 }
 
 /* --- Implement minimal direct scan using the new embedded structure --- */
+/*
+ * optimized_scan_getnextslot
+ * 
+ * This implementation follows the recommended approach for projection optimization:
+ * - It does NOT deform/extract all attributes up front.
+ * - It stores the raw tuple in the slot and sets up the slot for on-demand attribute extraction.
+ * - The slot's tts_ops should be set to the custom TupleTableSlotOps elsewhere (not here).
+ */
 static bool
 optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                           TupleTableSlot *slot)
@@ -332,7 +348,7 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
     HeapTuple tuple = &oscan->o_ctup;
     Page page;
     OffsetNumber maxOffset;
-	Snapshot snapshot = scan->rs_snapshot;
+    Snapshot snapshot = scan->rs_snapshot;
 
     while (oscan->currBlock < oscan->nblocks)
     {
@@ -354,42 +370,47 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                 tuple->t_tableOid = RelationGetRelid(oscan->rel);
                 ItemPointerSet(&tuple->t_self, oscan->currBlock, oscan->currOffset);
 
-				if (HeapTupleSatisfiesVisibility(tuple, snapshot, oscan->currBuffer))
-				{
-					/*
-					 * TEMPORARY: Revert to eager deformation to fix segfault.
-					 * We'll implement projection optimization more carefully in the next iteration.
-					 * The key insight is that we need to materialize a standard heap tuple
-					 * for executor compatibility while still storing our optimized format.
-					 */
-					
-					/* Clear the slot first */
-					ExecClearTuple(slot);
-					
-					TupleDesc tupdesc = scan->rs_rd->rd_att;
-					int natts = tupdesc->natts;
-					Datum *values = (Datum *) palloc0(natts * sizeof(Datum));
-					bool *isnull = (bool *) palloc0(natts * sizeof(bool));
-					
-					/* Extract all attributes from optimized format */
-					for (int i = 0; i < natts; i++)
-					{
-						values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, &isnull[i]);
-					}
-					
-					/* Create a standard heap tuple from the extracted values */
-					HeapTuple htup = heap_form_tuple(tupdesc, values, isnull);
-					pfree(values);
-					pfree(isnull);
-					
-					/* Store the standard heap tuple in the slot */
-					ExecStoreHeapTuple(htup, slot, true);
+                if (HeapTupleSatisfiesVisibility(tuple, snapshot, oscan->currBuffer))
+                {
+                    /*
+                    * SLOT-BASED PROJECTION OPTIMIZATION:
+                    * Store the raw optimized tuple directly in our custom slot.
+                    * No attribute extraction happens here - it's all on-demand!
+                    * 
+                    * When the executor needs specific attributes, it will call our
+                    * custom getsomeattrs function which will extract ONLY the
+                    * requested attributes from the optimized format.
+                    */
+                    
+                    // Cast to our custom slot type
+                    OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+                    
+                    ExecClearTuple(slot);
+                    
+                    // Store the raw optimized tuple (NO EXTRACTION YET!)
+                    opt_slot->opt_tuple = heap_copytuple(tuple);
+                    
+                    // Initialize attribute cache tracking
+                    if (!opt_slot->attr_cached) {
+                        opt_slot->attr_cached = (bool *) palloc0(
+                            slot->tts_tupleDescriptor->natts * sizeof(bool));
+                    } else {
+                        memset(opt_slot->attr_cached, false, 
+                            slot->tts_tupleDescriptor->natts * sizeof(bool));
+                    }
+                    
+                    // Mark slot as having data but NO extracted attributes yet
+                    slot->tts_flags &= ~TTS_FLAG_EMPTY;
+                    slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+                    slot->tts_nvalid = 0;  // CRITICAL: No attributes extracted yet!
+                    slot->tts_tid = tuple->t_self;
+                    slot->tts_tableOid = RelationGetRelid(oscan->rel);
 
-					/* Advance offset for next call */
-					oscan->currOffset++;
-					LockBuffer(oscan->currBuffer, BUFFER_LOCK_UNLOCK);
-					return true;
-				}
+                    /* Advance offset for next call */
+                    oscan->currOffset++;
+                    LockBuffer(oscan->currBuffer, BUFFER_LOCK_UNLOCK);
+                    return true;
+                }
             }
             oscan->currOffset++;
         }
@@ -497,6 +518,20 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bo
 
     OPTIMIZED_LOG("optimized_extract_attribute: fixed_data=%p", fixed_data);
 
+    /* Check if this specific attribute is NULL using the null bitmap */
+    if (null_bitmap != NULL)
+    {
+        int byte_offset = (attnum - 1) / 8;
+        int bit_offset = (attnum - 1) % 8;
+        
+        /* Check if the bit is 0 (NULL) or 1 (not NULL) */
+        if (!(null_bitmap[byte_offset] & (1 << bit_offset)))
+        {
+            *isnull = true;
+            return (Datum) 0;  /* Return NULL datum */
+        }
+    }
+    
     *isnull = false;
 
     /* Handle fixed-length columns */
@@ -612,26 +647,42 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
 static void
 optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 {
-	int i;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+	int attnum;
 
 	/*
-	 * Use our custom getattr function to extract attributes from the
-	 * optimized format. This avoids circular dependencies and ensures
-	 * we're using the correct extraction logic for our custom format.
+	 * PROJECTION OPTIMIZATION: Only extract attributes that haven't been
+	 * extracted yet and are within the requested range.
+	 * This is the key to making SELECT col1 FROM table fast!
 	 */
-	for (i = 1; i <= natts; i++)
-	{
-		slot->tts_values[i - 1] = optimized_getattr_for_slot(slot, i, &slot->tts_isnull[i - 1]);
-	}
 	
+	/* Ensure we have the attribute cache initialized */
+	if (!opt_slot->attr_cached)
+	{
+		opt_slot->attr_cached = (bool *) palloc0(
+			slot->tts_tupleDescriptor->natts * sizeof(bool));
+	}
+
+	/* Only extract attributes that we haven't cached yet */
+	for (attnum = slot->tts_nvalid + 1; attnum <= natts; attnum++)
+	{
+		if (!opt_slot->attr_cached[attnum - 1])
+		{
+			/* Extract this specific attribute on-demand */
+			slot->tts_values[attnum - 1] = optimized_getattr_for_slot(slot, attnum, &slot->tts_isnull[attnum - 1]);
+			opt_slot->attr_cached[attnum - 1] = true;
+		}
+	}
+
+	/* Update the number of valid attributes */
 	slot->tts_nvalid = natts;
 }
 
 static Datum
 optimized_getattr_for_slot(TupleTableSlot *slot, int attnum, bool *isnull)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
-	HeapTuple tuple = hslot->tuple;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+	HeapTuple tuple = opt_slot->opt_tuple;
 	TupleDesc tupleDesc = slot->tts_tupleDescriptor;
 	Datum datum;
 	Form_pg_attribute att;
@@ -785,12 +836,12 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                 varlena_size = VARSIZE_ANY(varlena_ptr);
                 
                 /* Sanity check for reasonable varlena size */
-                if (varlena_size > MaxAllocSize || varlena_size < VARHDRSZ)
+                if (varlena_size > MaxAllocSize || varlena_size < 1)
                 {
                     OPTIMIZED_LOG("ERROR: Invalid varlena size %zu for column %d (%s)", 
                                   varlena_size, i + 1, NameStr(att->attname));
-                    elog(ERROR, "Invalid varlena size %zu for column %s (expected %d to %zu)",
-                         varlena_size, NameStr(att->attname), VARHDRSZ, MaxAllocSize);
+                    elog(ERROR, "Invalid varlena size %zu for column %s (expected 1 to %zu)",
+                         varlena_size, NameStr(att->attname), MaxAllocSize);
                 }
                 
                 var_data_len += varlena_size;
@@ -1040,32 +1091,48 @@ optimized_relation_needs_toast_table(Relation rel)
  */
 static void optimized_slot_init(TupleTableSlot *slot)
 {
-	/* Use the heap tuple slot initialization */
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
-	hslot->tuple = NULL;
-	hslot->off = 0;
+	/* Initialize our custom optimized slot */
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+	opt_slot->opt_tuple = NULL;
+	opt_slot->attr_cached = NULL;
 }
 
 static void optimized_slot_release(TupleTableSlot *slot)
 {
-	/* No special cleanup needed for heap compatible slots */
+	/* Clean up our custom slot resources */
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+	
+	if (opt_slot->attr_cached)
+	{
+		pfree(opt_slot->attr_cached);
+		opt_slot->attr_cached = NULL;
+	}
 }
 
 static void optimized_slot_clear(TupleTableSlot *slot)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
-	
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+
 	if (TTS_SHOULDFREE(slot))
 	{
-		heap_freetuple(hslot->tuple);
+		if (opt_slot->opt_tuple)
+		{
+			heap_freetuple(opt_slot->opt_tuple);
+			opt_slot->opt_tuple = NULL;
+		}
 		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
 	}
-	
+
 	slot->tts_nvalid = 0;
 	slot->tts_flags |= TTS_FLAG_EMPTY;
 	ItemPointerSetInvalid(&slot->tts_tid);
-	hslot->off = 0;
-	hslot->tuple = NULL;
+	
+	/* Reset attribute cache tracking */
+	if (opt_slot->attr_cached)
+	{
+		memset(opt_slot->attr_cached, false, 
+			slot->tts_tupleDescriptor->natts * sizeof(bool));
+	}
 }
 
 static void optimized_slot_materialize(TupleTableSlot *slot)
@@ -1326,7 +1393,7 @@ static Datum optimized_slot_getsysattr(TupleTableSlot *slot, int attnum, bool *i
  * Based on TTSOpsHeapTuple but overrides getsomeattrs to use our optimized attribute extraction.
  */
 static const TupleTableSlotOps TTSOpsOptimized = {
-	.base_slot_size = sizeof(HeapTupleTableSlot),
+	.base_slot_size = sizeof(OptimizedTupleTableSlot),
 	.init = optimized_slot_init,
 	.release = optimized_slot_release,
 	.clear = optimized_slot_clear,
@@ -1361,7 +1428,10 @@ optimized_slot_callbacks(Relation relation)
 	 * in this callback, so we need to use heap operations for all cases to ensure
 	 * INSERT stability. The projection optimization will be implemented differently.
 	 */
-	return &TTSOpsHeapTuple;
+	//return &TTSOpsHeapTuple;
+
+    // Return our custom slot operations instead of heap operations
+    return &TTSOpsOptimized; 
 }
 
 /* --- Index Scan Implementation --- */

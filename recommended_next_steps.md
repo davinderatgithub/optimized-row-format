@@ -71,10 +71,34 @@ The extension currently delegates `UPDATE` and `DELETE` operations to the heap a
 
 ---
 
-## Priority 3: Address Indexing and Known Bugs
+## Priority 3: Address SERIAL/Sequence Support (CRITICAL)
 
 ### Root Cause
-The `README.md` notes that creating a `PRIMARY KEY` fails, and `NULL` values were causing crashes. These issues block wider functionality.
+Tables with `SERIAL` columns cause **server crashes** during INSERT operations. This is a blocking issue for many real-world use cases.
+
+### Issue Details
+- **Problem**: `CREATE TABLE ... (id SERIAL, ...) USING optimized_row_format` followed by INSERT causes server crash
+- **Root Cause**: SERIAL columns create sequences and default values that our extension doesn't handle properly
+- **Impact**: Any table with auto-incrementing IDs fails catastrophically
+- **Workaround**: Use `INTEGER` columns instead of `SERIAL` for now
+
+### Action Plan
+
+1.  **Implement Sequence/Default Value Support:**
+    -   Research how PostgreSQL handles default values in Table AMs
+    -   Implement proper sequence value fetching in `optimized_tuple_insert`
+    -   Add support for `nextval()` calls during insertion
+    -   Test with various default value types (sequences, functions, constants)
+
+2.  **Add SERIAL Column Tests:**
+    -   Create test cases that reproduce the crash
+    -   Verify fix works with `SERIAL`, `BIGSERIAL`, and custom sequences
+    -   Test both single-row and bulk INSERT operations
+
+## Priority 4: Address Indexing and Known Bugs
+
+### Root Cause
+The `README.md` notes that creating a `PRIMARY KEY` fails, and there are performance regressions in wide tables.
 
 ### Action Plan
 
@@ -86,9 +110,11 @@ The `README.md` notes that creating a `PRIMARY KEY` fails, and `NULL` values wer
         -   `index_fetch_end`
     -   Add a test case to `correctness.sql` that creates a primary key and queries via the index.
 
-2.  **Fix NULL Value Crash:**
-    -   Add test cases with various `NULL` patterns to `correctness.sql`.
-    -   Use a debugger or extensive logging in `optimized_tuple_insert` and `optimized_getattr` to trace the handling of the null bitmap and data pointers to find the source of the invalid memory access.
+2.  **Fix Performance Regressions:**
+    -   **Many-column INSERT**: 2.5x slower than heap (0.40x speedup)
+    -   **Single-column SELECT**: 5.5x slower than heap (0.18x speedup) 
+    -   **Variable-length SELECT**: 26x slower than heap (0.038x speedup)
+    -   These regressions suggest the projection optimization isn't working properly
 
 ---
 
@@ -110,19 +136,34 @@ Test results show that `INSERT` operations are slower and storage consumption is
 
 ## Implementation Timeline
 
-### Week 1: Critical Performance Fix
-- [ ] Implement custom `TupleTableSlotOps` for on-demand `getattr`.
-- [ ] Refactor `optimized_scan_getnextslot` to remove the eager deform loop.
-- [ ] **Verify:** `SELECT` queries on the many-columns test are now faster than heap.
+### Week 1: Critical Fixes (COMPLETED ✅)
+- [x] ✅ **NULL Handling Fixed**: Added proper null bitmap checking in `optimized_extract_attribute`
+- [x] ✅ **Projection Optimization**: Implemented custom `TupleTableSlotOps` with on-demand attribute fetching
+- [x] ✅ **SERIAL Workaround**: Identified and documented SERIAL column crash issue
+- [x] ✅ **Basic Functionality**: INSERT/SELECT operations work for non-SERIAL tables
 
-### Week 2-3: Core Functionality
+### Week 2: Performance Investigation (URGENT)
+- [ ] **Debug Performance Regressions**: Investigate why projection optimization shows poor performance
+  - Many-column INSERT: 2.5x slower than heap
+  - Single-column SELECT: 5.5x slower than heap  
+  - Variable-length SELECT: 26x slower than heap
+- [ ] **Fix Projection Logic**: Ensure `optimized_getsomeattrs` is actually being called
+- [ ] **Profile Attribute Extraction**: Optimize `optimized_extract_attribute` function
+
+### Week 3: SERIAL/Sequence Support
+- [ ] **Research Default Values**: Study how heap AM handles SERIAL columns
+- [ ] **Implement Sequence Support**: Add proper `nextval()` handling in tuple insertion
+- [ ] **Test SERIAL Columns**: Verify fix works without server crashes
+- [ ] **Update Performance Tests**: Re-enable SERIAL columns in test suite
+
+### Week 4-5: Core DML Operations
 - [ ] Implement `optimized_tuple_delete`.
 - [ ] Implement `optimized_tuple_update`.
 - [ ] Add `UPDATE`/`DELETE` tests to `correctness.sql`.
 - [ ] Implement basic `index_fetch_tuple` to allow primary key creation.
 
-### Month 2: Bug Fixing and Optimization
-- [ ] Create and pass tests for `NULL` value handling.
-- [ ] Profile and optimize `INSERT` performance.
-- [ ] Analyze and fix the storage inefficiency.
+### Month 2: Production Readiness
+- [ ] Fix storage efficiency regression for many-column tables
+- [ ] Profile and optimize `INSERT` performance for wide tables
 - [ ] Begin implementing production-readiness features like `VACUUM` and WAL logging.
+- [ ] Add comprehensive test coverage for edge cases
