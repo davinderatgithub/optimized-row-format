@@ -38,7 +38,7 @@ PG_MODULE_MAGIC;
  * This allows us to control logging independently of PostgreSQL's general debug level
  */
 #define OPTIMIZED_LOG(fmt, ...) \
-    /* Debug logging disabled for production */
+    elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
 
 /*
  * Optimized Storage Format
@@ -753,6 +753,9 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	int attnum;
 
+	OPTIMIZED_LOG("optimized_getsomeattrs: called with natts=%d, current tts_nvalid=%d", 
+	              natts, slot->tts_nvalid);
+
 	/*
 	 * PROJECTION OPTIMIZATION: Only extract attributes that haven't been
 	 * extracted yet and are within the requested range.
@@ -875,7 +878,11 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
             }
             else
             {
-                var_col_count++;
+                /* Only count variable-length columns that are not NULL */
+                if (!isnull_array[i])
+                {
+                    var_col_count++;
+                }
                 /* We'll calculate actual variable data length in second pass */
             }
         }

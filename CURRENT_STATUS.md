@@ -50,10 +50,16 @@
 
 ## 🚨 **Critical Issues**
 
-### **Issue 1: SERIAL Column Server Crash** (CRITICAL)
-- **Status**: Identified, workaround available
-- **Impact**: Any table with `SERIAL` columns crashes the server
-- **Workaround**: Use `INTEGER` columns instead
+### **Issue 1: SERIAL/PRIMARY KEY + NULL Values Server Crash** (CRITICAL)
+- **Status**: Root cause identified and core bug FIXED ✅
+- **Root Cause**: `var_col_count` mismatch between counting and storing NULL variable columns
+- **Technical Details**: 
+  - PRIMARY KEY/SERIAL triggers duplicate checking during INSERT
+  - Old bug: counted ALL variable columns (including NULLs), stored only non-NULL columns
+  - Result: corrupted `var_col_count` (e.g., 1936269427) → server crash
+- **Fix Applied**: `optimized_tuple_insert()` now only counts non-NULL variable columns
+- **Remaining Work**: Need to implement proper SERIAL/PRIMARY KEY constraint support
+- **Workaround**: Use `INTEGER` columns instead of `SERIAL`/`PRIMARY KEY`
 - **Test**: `test/sql/known_issues.sql` (commented out to prevent crashes)
 
 ### **Issue 2: Projection Optimization Failure** (MAJOR)

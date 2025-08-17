@@ -10,31 +10,43 @@
 CREATE EXTENSION IF NOT EXISTS optimized_row_format;
 
 \echo ''
-\echo '=== ISSUE 1: SERIAL Column Server Crash ==='
-\echo 'Status: CRITICAL - Causes server crash'
-\echo 'Workaround: Use INTEGER columns instead of SERIAL'
+\echo '=== ISSUE 1: SERIAL/PRIMARY KEY + NULL Values Server Crash ==='
+\echo 'Status: CRITICAL - Causes server crash when inserting NULL values'
+\echo 'Root Cause: var_col_count mismatch between counting and storing phases'
+\echo 'Technical Details: PRIMARY KEY triggers duplicate checking during INSERT'
+\echo '  - INSERT with NULL values corrupts var_col_count in tuple'  
+\echo '  - SELECT operations read corrupted var_col_count (e.g. 1936269427)'
+\echo '  - Server crashes with: "server closed the connection unexpectedly"'
+\echo 'Workaround: Use INTEGER columns instead of SERIAL/PRIMARY KEY'
+\echo 'Fix Status: Core var_col_count counting bug FIXED in optimized_tuple_insert()'
+\echo '  - Still need to implement proper SERIAL/PRIMARY KEY support'
 
--- This test will crash the server - uncomment to reproduce
+-- This test will crash the server with NULL values in SERIAL tables
 -- DO $$
 -- BEGIN
 --     BEGIN
---         DROP TABLE IF EXISTS test_serial_crash;
---         CREATE TABLE test_serial_crash (
+--         DROP TABLE IF EXISTS test_optimized_mixed1;
+--         CREATE TABLE test_optimized_mixed1 (
 --             id SERIAL,
---             name TEXT,
---             value INTEGER
+--             text_col TEXT,
+--             varchar_col VARCHAR(100)
 --         ) USING optimized_row_format;
 --         
---         -- This INSERT will crash the server
---         INSERT INTO test_serial_crash (name, value) VALUES ('test', 123);
+--         -- This INSERT will crash due to SERIAL constraint checking corrupted data
+--         -- The NULL varchar_col triggers the var_col_count corruption bug
+--         INSERT INTO test_optimized_mixed1 VALUES (
+--             1,                                    -- id
+--             'This is a test text column',        -- text_col
+--             NULL                                  -- varchar_col (triggers crash)
+--         );
 --         
---         RAISE NOTICE 'UNEXPECTED: SERIAL test passed - issue may be fixed!';
+--         RAISE NOTICE 'UNEXPECTED: SERIAL+NULL test passed - issue may be fixed!';
 --     EXCEPTION WHEN OTHERS THEN
---         RAISE NOTICE 'EXPECTED: SERIAL test failed with: %', SQLERRM;
+--         RAISE NOTICE 'EXPECTED: SERIAL+NULL test failed with: %', SQLERRM;
 --     END;
 -- END $$;
 
-\echo 'SERIAL test skipped to prevent server crash'
+\echo 'SERIAL+NULL test skipped to prevent server crash'
 \echo 'To reproduce: uncomment the DO block above'
 
 \echo ''
