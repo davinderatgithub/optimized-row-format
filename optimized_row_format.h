@@ -18,6 +18,18 @@ typedef OptimizedTupleHeaderData *OptimizedTupleHeader;
 /* Size of the optimized tuple header */
 #define SizeofOptimizedTupleHeader offsetof(HeapTupleHeaderData, t_bits)
 
+/* Flags in t_infomask2 for optimized row format features */
+#define OPTIMIZED_OFFSET_16BIT 0x8000  /* Use 16-bit offset encoding */
+
+/*
+ * Storage optimization flags for offset array encoding
+ */
+typedef enum
+{
+    OFFSET_ENCODING_32BIT = 0,    /* Standard 4-byte offsets */
+    OFFSET_ENCODING_16BIT = 1     /* Compressed 2-byte offsets */
+} OffsetEncodingType;
+
 /*
  * Cache structure for column position mappings to eliminate O(N) lookups
  * This is stored in the relation's rd_amcache for efficient access
@@ -29,6 +41,7 @@ typedef struct OptimizedColumnMapCache
     int *var_indexes;            /* Array of variable-length column indexes */
     Size fixed_data_len;         /* Total length of fixed-length data */
     int var_col_count;           /* Number of variable-length columns */
+    OffsetEncodingType encoding;  /* Offset array encoding type */
 } OptimizedColumnMapCache;
 
 #endif /* OPTIMIZED_ROW_FORMAT_H */

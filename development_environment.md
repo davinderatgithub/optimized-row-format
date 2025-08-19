@@ -61,13 +61,13 @@ After making changes to the C code and rebuilding the extension with `make && ma
 
 1.  **Stop the Server:**
     ```bash
-    /Users/davindersingh/personal/postgres/build/bin/pg_ctl stop -D /path/to/your/postgres/data -m fast
+    /Users/davindersingh/personal/postgres/build/bin/pg_ctl stop -D /Users/davindersingh/personal/postgres/build/bin/data -m fast
     ```
     *(Note: The data directory `-D` path above is an example. Please verify the correct path for your setup.)*
 
 2.  **Start the Server:**
     ```bash
-    /Users/davindersingh/personal/postgres/build/bin/pg_ctl start -D /path/to/your/postgres/data
+    /Users/davindersingh/personal/postgres/build/bin/pg_ctl start -D /Users/davindersingh/personal/postgres/build/bin/data
     ```
 
 **Failure to restart the server after a rebuild is the most common cause of tests running against stale code.** Always include this restart step in your workflow before running any tests. 
