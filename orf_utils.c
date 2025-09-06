@@ -150,10 +150,38 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             
             /* Calculate fixed data pointer with minimal overhead */
             char *data_start = (char *) header + header->t_hoff;
-            uint32 *var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
-            uint32 var_col_count = *var_col_count_ptr;
-            uint32 *var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
-            char *fixed_data = (char *)var_offsets + MAXALIGN(var_col_count * sizeof(uint32));
+            char *fixed_data;
+            
+            /* Account for NULL bitmap if present */
+            if (header->t_infomask & HEAP_HASNULL)
+            {
+                char *null_bitmap = data_start;
+                uint32 *var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupleDesc->natts)));
+                uint32 var_col_count = *var_col_count_ptr;
+                uint32 *var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+                
+                /* Use correct offset array size based on encoding */
+                OffsetEncodingType encoding = (header->t_infomask2 & OPTIMIZED_OFFSET_16BIT) ? 
+                    OFFSET_ENCODING_16BIT : OFFSET_ENCODING_32BIT;
+                size_t offset_array_size = (encoding == OFFSET_ENCODING_16BIT) ? 
+                    MAXALIGN(var_col_count * sizeof(uint16)) : 
+                    MAXALIGN(var_col_count * sizeof(uint32));
+                fixed_data = (char *)var_offsets + offset_array_size;
+            }
+            else
+            {
+                uint32 *var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+                uint32 var_col_count = *var_col_count_ptr;
+                uint32 *var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+                
+                /* Use correct offset array size based on encoding */
+                OffsetEncodingType encoding = (header->t_infomask2 & OPTIMIZED_OFFSET_16BIT) ? 
+                    OFFSET_ENCODING_16BIT : OFFSET_ENCODING_32BIT;
+                size_t offset_array_size = (encoding == OFFSET_ENCODING_16BIT) ? 
+                    MAXALIGN(var_col_count * sizeof(uint16)) : 
+                    MAXALIGN(var_col_count * sizeof(uint32));
+                fixed_data = (char *)var_offsets + offset_array_size;
+            }
             
             char *data_ptr = fixed_data + fixed_off;
             *isnull = false;
@@ -186,14 +214,54 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             int target_var_index = cache->var_indexes[attnum - 1];
             
             char *data_start = (char *) header + header->t_hoff;
-            uint32 *var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+            uint32 *var_col_count_ptr;
+            uint32 *var_offsets;
+            
+            /* Account for NULL bitmap if present */
+            if (header->t_infomask & HEAP_HASNULL)
+            {
+                char *null_bitmap = data_start;
+                var_col_count_ptr = (uint32 *) (null_bitmap + MAXALIGN(BITMAPLEN(tupleDesc->natts)));
+                var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+            }
+            else
+            {
+                var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+                var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+            }
+            
             uint32 var_col_count = *var_col_count_ptr;
-            uint32 *var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+            
+            /* Check if this specific attribute is NULL using the null bitmap */
+            if (header->t_infomask & HEAP_HASNULL)
+            {
+                char *null_bitmap = data_start;
+                int byte_offset = (attnum - 1) / 8;
+                int bit_offset = (attnum - 1) % 8;
+                
+                /* Check if the bit is 0 (NULL) or 1 (not NULL) */
+                if (!(null_bitmap[byte_offset] & (1 << bit_offset)))
+                {
+                    *isnull = true;
+                    return (Datum) 0;  /* Return NULL datum */
+                }
+            }
             
             *isnull = false;
             if (target_var_index < var_col_count)
             {
-                uint32 absolute_offset = var_offsets[target_var_index];
+                /* Read offset based on encoding type */
+                OffsetEncodingType encoding = (header->t_infomask2 & OPTIMIZED_OFFSET_16BIT) ? 
+                    OFFSET_ENCODING_16BIT : OFFSET_ENCODING_32BIT;
+                
+                uint32 absolute_offset;
+                if (encoding == OFFSET_ENCODING_16BIT) {
+                    uint16 *var_offsets_16 = (uint16 *) var_offsets;
+                    absolute_offset = var_offsets_16[target_var_index];
+                } else {
+                    absolute_offset = var_offsets[target_var_index];
+                }
+                
                 char *var_data_ptr = (char *)header + absolute_offset;
                 return PointerGetDatum(var_data_ptr);
             }
@@ -281,7 +349,12 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
          var_col_count, tupleDesc->natts, HeapTupleHasNulls(tuple));
 
     /* Fixed data starts immediately after the variable offsets array */
-    fixed_data = (char *)var_offsets + MAXALIGN(var_col_count * sizeof(uint32));
+    /* CRITICAL FIX: Account for offset encoding type when calculating fixed data pointer */
+    OffsetEncodingType encoding = (header->t_infomask2 & OPTIMIZED_OFFSET_16BIT) ? 
+        OFFSET_ENCODING_16BIT : OFFSET_ENCODING_32BIT;
+    
+    size_t offset_size = (encoding == OFFSET_ENCODING_16BIT) ? sizeof(uint16) : sizeof(uint32);
+    fixed_data = (char *)var_offsets + MAXALIGN(var_col_count * offset_size);
 
     OPTIMIZED_LOG("optimized_extract_attribute: fixed_data=%p", fixed_data);
 
@@ -357,11 +430,55 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
         /* Get the data from the variable section using the absolute offset */
         if (target_var_index < var_col_count)
         {
-            uint32 absolute_offset = var_offsets[target_var_index];
+            /* Read offset encoding from tuple header */
+            OffsetEncodingType encoding = (header->t_infomask2 & OPTIMIZED_OFFSET_16BIT) ? 
+                OFFSET_ENCODING_16BIT : OFFSET_ENCODING_32BIT;
+            
+            uint32 absolute_offset;
+            if (encoding == OFFSET_ENCODING_16BIT) {
+                uint16 *var_offsets_16 = (uint16 *) var_offsets;
+                absolute_offset = var_offsets_16[target_var_index];
+                OPTIMIZED_LOG("16-bit offset read: var_offsets=%p, var_offsets_16=%p, target_var_index=%d, raw_value=%u", 
+                             var_offsets, var_offsets_16, target_var_index, var_offsets_16[target_var_index]);
+            } else {
+                absolute_offset = var_offsets[target_var_index];
+                OPTIMIZED_LOG("32-bit offset read: var_offsets=%p, target_var_index=%d, raw_value=%u", 
+                             var_offsets, target_var_index, var_offsets[target_var_index]);
+            }
             char *var_data_ptr = (char *)header + absolute_offset;
-            OPTIMIZED_LOG("optimized_extract_attribute: absolute offset=%u, var_data_ptr=%p", absolute_offset, var_data_ptr);
-            /* Variable-length data is always pass-by-reference */
-            return PointerGetDatum(var_data_ptr);
+            OPTIMIZED_LOG("optimized_extract_attribute: encoding=%s, target_var_index=%d, absolute_offset=%u, var_data_ptr=%p", 
+                         (encoding == OFFSET_ENCODING_16BIT) ? "16-bit" : "32-bit",
+                         target_var_index, absolute_offset, var_data_ptr);
+            
+            /* 
+             * CRITICAL FIX: The data is already in proper varlena format from when we stored it.
+             * We stored the complete varlena structure (including length header) in our optimized format,
+             * so we can return it directly as a pointer.
+             * 
+             * However, we need to ensure no TOAST compression flags are set incorrectly.
+             */
+            struct varlena *varlena_ptr = (struct varlena *) var_data_ptr;
+            
+            /* Validate varlena structure before returning */
+            Size varsize = VARSIZE_ANY(varlena_ptr);
+            OPTIMIZED_LOG("optimized_extract_attribute: varlena_ptr=%p, raw_size=%zu, first_4_bytes=0x%08x", 
+                         varlena_ptr, varsize, *((uint32*)varlena_ptr));
+            
+            /* Check for obviously corrupted size */
+            if (varsize > 1073741824 || varsize < 1) /* 1GB limit, minimum 1 byte */
+            {
+                elog(ERROR, "CORRUPTION: Invalid varlena size %zu at offset %u, first_4_bytes=0x%08x", 
+                     varsize, absolute_offset, *((uint32*)varlena_ptr));
+            }
+            
+            /* Debug check for TOAST compression flags */
+            if (VARATT_IS_COMPRESSED(varlena_ptr) || VARATT_IS_EXTERNAL(varlena_ptr))
+            {
+                elog(NOTICE, "DEBUG: PostgreSQL thinks varlena data is compressed! Size=%zu", varsize);
+            }
+            
+            OPTIMIZED_LOG("optimized_extract_attribute: returning valid varlena data at %p, size=%zu", varlena_ptr, varsize);
+            return PointerGetDatum(varlena_ptr);
         }
         else
         {
