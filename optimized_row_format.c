@@ -1,15 +1,17 @@
 #include "postgres.h"
 
 /* Required for most Postgres development */
-#include "access/tableam.h"
+#include "postgres.h"
 #include "fmgr.h"
-#include "nodes/pg_list.h"
+#include "access/tableam.h"
+#include "commands/defrem.h"
+#include "nodes/makefuncs.h"
+#include "utils/rel.h"
+#include "catalog/namespace.h"
 
 #include "optimized_row_format.h"
-#include "orf_scan.h"
-#include "orf_slot.h"
-#include "orf_dml.h"
-#include "orf_utils.h"
+#include "orf_debug.h"
+#include "orf_functions.h"
 
 
 PG_MODULE_MAGIC;
@@ -57,7 +59,7 @@ optimized_row_format_tableam_handler(PG_FUNCTION_ARGS)
         optimized_tableam.tuple_delete = optimized_tuple_delete;
         optimized_tableam.tuple_update = optimized_tuple_update;
 		optimized_tableam.relation_needs_toast_table = optimized_relation_needs_toast_table;
-		optimized_tableam.slot_callbacks = optimized_slot_callbacks;
+		// optimized_tableam.slot_callbacks = optimized_slot_callbacks; // Temporarily disabled for debugging
 
 		/* Index scan functions */
 		optimized_tableam.index_fetch_begin = optimized_index_fetch_begin;

@@ -1,0 +1,23 @@
+-- Basic functionality test for optimized_row_format extension
+-- Test 1: Extension creation
+CREATE EXTENSION IF NOT EXISTS optimized_row_format;
+-- Test 2: Table creation with optimized format
+CREATE TABLE test_basic (
+    id int,
+    name text,
+    value bigint
+) USING optimized_row_format;
+-- Test 3: Data insertion
+INSERT INTO test_basic VALUES (1, 'first', 100);
+INSERT INTO test_basic VALUES (2, 'second', 200);
+--INSERT INTO test_basic VALUES (3, NULL, 300); -- TODO: add support for NULLs
+-- Test 4: Data selection
+SELECT * FROM test_basic ORDER BY id;
+ id |  name  | value 
+----+--------+-------
+  1 | first  |   100
+  2 | second |   200
+(2 rows)
+
+-- Cleanup
+DROP TABLE test_basic;

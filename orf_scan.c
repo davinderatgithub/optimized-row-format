@@ -2,13 +2,16 @@
 #include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "executor/tuptable.h"
 #include "storage/bufmgr.h"
 #include "utils/rel.h"
-#include "executor/tuptable.h"
+#include "access/htup_details.h"
+#include "utils/snapmgr.h"
+#include "storage/lmgr.h"
 
 #include "optimized_row_format.h"
-#include "orf_scan.h"
-#include "orf_slot.h"
+#include "orf_debug.h"
+#include "orf_functions.h"
 #include "orf_utils.h"
 
 /*
@@ -116,14 +119,26 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
 
     while (oscan->currBlock < oscan->nblocks)
     {
-        /* Read the current block if not already loaded */
-        if (!BufferIsValid(oscan->currBuffer))
-            oscan->currBuffer = ReadBuffer(oscan->rel, oscan->currBlock);
+        ORF_DEBUG_VERBOSE(scan, "Starting scan loop, currBlock=%u, nblocks=%u", oscan->currBlock, oscan->nblocks);
+    
+        ORF_DEBUG_VERBOSE(scan, "Processing block %u", oscan->currBlock);
+        
+        /* Release previous buffer if we have one */
+        if (BufferIsValid(oscan->currBuffer))
+        {
+            ReleaseBuffer(oscan->currBuffer);
+            oscan->currBuffer = InvalidBuffer;
+        }
+        
+        /* Get buffer for current block */
+        oscan->currBuffer = ReadBuffer(oscan->rel, oscan->currBlock);
         LockBuffer(oscan->currBuffer, BUFFER_LOCK_SHARE);
         page = BufferGetPage(oscan->currBuffer);
-        maxOffset = PageGetMaxOffsetNumber(page);
-
-        while (oscan->currOffset <= maxOffset)
+        
+        ORF_DEBUG_VERBOSE(scan, "Page max offset = %u, currOffset = %u", PageGetMaxOffsetNumber(page), oscan->currOffset);
+        
+        /* Scan tuples on this page */
+        while (oscan->currOffset <= PageGetMaxOffsetNumber(page))
         {
             ItemId itemId = PageGetItemId(page, oscan->currOffset);
             if (ItemIdIsUsed(itemId))
@@ -137,48 +152,38 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                 if (HeapTupleSatisfiesVisibility(tuple, snapshot, oscan->currBuffer))
                 {
                     /*
-                    * SLOT-BASED PROJECTION OPTIMIZATION:
-                    * Store the raw optimized tuple directly in our custom slot.
-                    * No attribute extraction happens here - it's all on-demand!
-                    * 
-                    * When the executor needs specific attributes, it will call our
-                    * custom getsomeattrs function which will extract ONLY the
-                    * requested attributes from the optimized format.
+                    * SIMPLIFIED FIX: Always extract all attributes and store as values
+                    * This works with any slot type and avoids slot compatibility issues
                     */
                     
-                    // Cast to our custom slot type
-                    OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+                    ORF_DEBUG_INFO(scan, "Found visible tuple at block=%u, offset=%u", oscan->currBlock, oscan->currOffset);
+                    
+                    TupleDesc tupdesc = slot->tts_tupleDescriptor;
+                    int natts = tupdesc->natts;
+                    int i;
                     
                     ExecClearTuple(slot);
                     
-                    // Store the raw optimized tuple (NO EXTRACTION YET!)
-                    opt_slot->opt_tuple = heap_copytuple(tuple);
+                    ORF_DEBUG_VERBOSE(scan, "About to extract %d attributes", natts);
                     
-                    // Pass the column cache to the slot for O(1) attribute access
-                    opt_slot->column_cache = oscan->column_cache;
-                    
-                    // PERFORMANCE OPTIMIZATION: Initialize cached data pointers
-                    optimized_slot_init_cache(opt_slot);
-                    
-                    // Initialize attribute cache tracking
-                    if (!opt_slot->attr_cached) {
-                        opt_slot->attr_cached = (bool *) palloc0(
-                            slot->tts_tupleDescriptor->natts * sizeof(bool));
-                    } else {
-                        memset(opt_slot->attr_cached, false, 
-                            slot->tts_tupleDescriptor->natts * sizeof(bool));
+                    // Extract all attributes from optimized format and store directly in slot
+                    for (i = 0; i < natts; i++)
+                    {
+                        ORF_DEBUG_VERBOSE(scan, "Extracting attribute %d", i);
+                        slot->tts_values[i] = optimized_extract_attribute_no_cache(tuple, i + 1, tupdesc, &slot->tts_isnull[i]);
+                        ORF_DEBUG_VERBOSE(scan, "Extracted attribute %d successfully", i);
                     }
                     
-                    // Mark slot as having data but NO extracted attributes yet
+                    // Mark slot as having all attributes extracted
                     slot->tts_flags &= ~TTS_FLAG_EMPTY;
-                    slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-                    slot->tts_nvalid = 0;  // CRITICAL: No attributes extracted yet!
+                    slot->tts_nvalid = natts;
                     slot->tts_tid = tuple->t_self;
                     slot->tts_tableOid = RelationGetRelid(oscan->rel);
 
                     /* Advance offset for next call */
                     oscan->currOffset++;
                     LockBuffer(oscan->currBuffer, BUFFER_LOCK_UNLOCK);
+                    /* Keep buffer pinned - will be released on next call or scan end */
                     return true;
                 }
             }

@@ -1,10 +1,14 @@
 #include "postgres.h"
 #include "access/htup_details.h"
-#include "catalog/pg_type.h"
-#include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/memutils.h"
+#include "catalog/pg_type.h"
 #include "utils/lsyscache.h"
-#include "orf_utils.h"
+#include "access/detoast.h"
+
+#include "optimized_row_format.h"
+#include "orf_debug.h"
+#include "orf_functions.h"
 
 /*
  * Custom logging for optimized row format extension
@@ -12,7 +16,7 @@
  */
 // #define OPTIMIZED_LOG(fmt, ...) \
 //     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
+#define OPTIMIZED_LOG(fmt, ...) ORF_DEBUG_INFO(utils, fmt, ##__VA_ARGS__)
 
 /*
  * build_column_cache
@@ -87,6 +91,10 @@ build_column_cache(TupleDesc tupleDesc)
 	return cache;
 }
 
+/* Forward declaration */
+Datum optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc, 
+                                 OptimizedColumnMapCache *cache, bool *isnull);
+
 /*
  * optimized_extract_attribute_no_cache
  *      Fallback function for cases where we don't have a cache available.
@@ -95,6 +103,7 @@ build_column_cache(TupleDesc tupleDesc)
 Datum
 optimized_extract_attribute_no_cache(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull)
 {
+
 	/* Build a temporary cache for this operation */
 	OptimizedColumnMapCache *temp_cache = build_column_cache(tupleDesc);
 	Datum result;
@@ -474,7 +483,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             /* Debug check for TOAST compression flags */
             if (VARATT_IS_COMPRESSED(varlena_ptr) || VARATT_IS_EXTERNAL(varlena_ptr))
             {
-                elog(NOTICE, "DEBUG: PostgreSQL thinks varlena data is compressed! Size=%zu", varsize);
+                ORF_DEBUG_VERBOSE(utils, "PostgreSQL thinks varlena data is compressed! Size=%zu", varsize);
             }
             
             OPTIMIZED_LOG("optimized_extract_attribute: returning valid varlena data at %p, size=%zu", varlena_ptr, varsize);

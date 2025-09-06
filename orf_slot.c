@@ -572,10 +572,14 @@ static const TupleTableSlotOps TTSOpsOptimized = {
  *
  * This is called by the PostgreSQL executor to determine what type of slot
  * operations to use for our table AM. This is critical for projection optimization.
+ * 
+ * CRITICAL FIX: For UPDATE operations, we need to return buffer tuple slot operations
+ * to satisfy the TTS_IS_BUFFERTUPLE assertion in heapam_handler.c
  */
 const TupleTableSlotOps *
 optimized_slot_callbacks(Relation relation)
 {
-    // Return our custom slot operations instead of heap operations
-    return &TTSOpsOptimized; 
+    // For now, return heap buffer tuple operations to fix UPDATE crashes
+    // TODO: Implement proper optimized slot operations that are compatible with UPDATE
+    return &TTSOpsBufferHeapTuple; 
 }

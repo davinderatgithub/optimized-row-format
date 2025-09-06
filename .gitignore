@@ -35,4 +35,4 @@ Thumbs.db
 # Test output (but keep expected outputs)
 regression.diffs
 regression.out
-test/results/
+test/results/.env

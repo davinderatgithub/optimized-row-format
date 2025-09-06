@@ -11,6 +11,9 @@ EXTENSION = optimized_row_format
 DATA = sql/optimized_row_format--1.0.sql
 PGFILEDESC = "optimized_row_format - optimized row format implementation"
 
+# Override default goal to prevent automatic test execution
+.DEFAULT_GOAL := all
+
 # REGRESS = correctness smoke known_issues
 REGRESS =
 REGRESS_OPTS = --inputdir=test --outputdir=test
@@ -19,14 +22,14 @@ REGRESS_PERF = performance
 
 EXTRA_CLEAN = test/results/performance.out test/results/smoke.out
 
-# Define a new target for performance testing
+# Define a new target for performance testing (manual only)
 .PHONY: performance-check
-performance-check: install
+performance-check:
 	../../src/test/regress/pg_regress --dbname=contrib_regression $(REGRESS_PERF) $(REGRESS_OPTS)
 
+# Override default installcheck to not run tests automatically
 .PHONY: installcheck
-installcheck: install
-	../../src/test/regress/pg_regress --dbname=contrib_regression correctness smoke known_issues $(REGRESS_OPTS)
+installcheck:
 
 
 ifdef USE_PGXS

@@ -1,21 +1,25 @@
 #include "postgres.h"
 #include "access/heapam.h"
-#include "access/hio.h"
 #include "access/htup_details.h"
-#include "access/table.h"
-#include "access/transam.h"
-#include "access/visibilitymap.h"
+#include "access/multixact.h"
+#include "access/tableam.h"
 #include "access/xact.h"
-#include "catalog/pg_type.h"
+#include "catalog/catalog.h"
 #include "executor/tuptable.h"
-#include "pgstat.h"
-#include "storage/bufmgr.h"
-#include "utils/rel.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
+#include "storage/lmgr.h"
+#include "utils/rel.h"
+#include "access/xloginsert.h"
+#include "access/xlog.h"
+#include "access/visibilitymap.h"
+#include "pgstat.h"
 #include "utils/memutils.h"
-#include "fmgr.h"
+#include "access/heaptoast.h"
+#include "access/hio.h"
 
 #include "optimized_row_format.h"
+#include "orf_debug.h"
 #include "orf_dml.h"
 #include "orf_utils.h" /* For choose_offset_encoding */
 
@@ -241,9 +245,8 @@ build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot)
  * Custom logging for optimized row format extension
  * ENABLED for debugging UPDATE crashes
  */
-#define OPTIMIZED_LOG(fmt, ...) \
-    elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-// #define OPTIMIZED_LOG(fmt, ...) do { } while (0)
+/* Use the new configurable debug system */
+#define OPTIMIZED_LOG(fmt, ...) ORF_DEBUG_INFO(dml, fmt, ##__VA_ARGS__)
 
 /* Forward declarations */
 static HeapTuple build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot);
