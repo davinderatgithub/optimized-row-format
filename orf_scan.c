@@ -170,7 +170,8 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                     for (i = 0; i < natts; i++)
                     {
                         ORF_DEBUG_VERBOSE(scan, "Extracting attribute %d", i);
-                        slot->tts_values[i] = optimized_extract_attribute_no_cache(tuple, i + 1, tupdesc, &slot->tts_isnull[i]);
+                        //slot->tts_values[i] = optimized_extract_attribute_no_cache(tuple, i + 1, tupdesc, &slot->tts_isnull[i]);
+                        slot->tts_values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, oscan->column_cache, &slot->tts_isnull[i]);
                         ORF_DEBUG_VERBOSE(scan, "Extracted attribute %d successfully", i);
                     }
                     

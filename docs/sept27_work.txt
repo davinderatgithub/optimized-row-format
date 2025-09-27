@@ -1,0 +1,54 @@
+I see some issues here, You need explain, don't make any changes.
+
+optimized_extract_attribute_no_cache ()
+It creats cache and distroy after extracting only one attribute, I think this cache needs to be used at tuple level, so that we don't create and destroy after each attribute, it should be created only once for each tuple.
+BTW, why do we extract all the columns when user asked only for 2 columns?
+
+Also where is the function that we use if we have data in the cache?
+
+In case of heap
+it uses this path to get data from cache without extracting the attribute again,
+nocachegetattr (src/backend/access/common/heaptuple.c:711)
+fastgetattr (src/include/access/htup_details.h:778)
+heap_getattr (src/include/access/htup_details.h:804)
+GetSysCacheOid (src/backend/utils/cache/syscache.c:463)
+get_relname_relid (src/backend/utils/cache/lsyscache.c:1887)
+RelnameGetRelid (src/backend/catalog/namespace.c:896)
+RangeVarGetRelidExtended (src/backend/catalog/namespace.c:539)
+relation_openrv_extended (src/backend/access/common/relation.c:185)
+table_openrv_extended (src/backend/access/table/table.c:108)
+parserOpenTable (src/backend/parser/parse_relation.c:1424)
+addRangeTableEntry (src/backend/parser/parse_relation.c:1501)
+transformTableEntry (src/backend/parser/parse_clause.c:400)
+transformFromClauseItem (src/backend/parser/parse_clause.c:1075)
+transformFromClause (src/backend/parser/parse_clause.c:133)
+transformSelectStmt (src/backend/parser/analyze.c:1368)
+transformStmt (src/backend/parser/analyze.c:368)
+transformOptionalSelectInto (src/backend/parser/analyze.c:303)
+transformTopLevelStmt (src/backend/parser/analyze.c:253)
+parse_analyze_fixedparams (src/backend/parser/analyze.c:121)
+pg_analyze_and_rewrite_fixedparams (src/backend/tcop/postgres.c:692)
+
+However in case of optimized format
+optimized_scan_getnextslot (contrib/optimized_row_format/orf_scan.c:172)
+table_scan_getnextslot (src/include/access/tableam.h:1072)
+SeqNext (src/backend/executor/nodeSeqscan.c:80)
+ExecScanFetch (src/backend/executor/execScan.c:131)
+ExecScan (src/backend/executor/execScan.c:197)
+ExecSeqScan (src/backend/executor/nodeSeqscan.c:112)
+ExecProcNodeFirst (src/backend/executor/execProcnode.c:464)
+ExecProcNode (src/include/executor/executor.h:274)
+ExecutePlan (src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (src/backend/executor/execMain.c:361)
+ExecutorRun (src/backend/executor/execMain.c:307)
+PortalRunSelect (src/backend/tcop/pquery.c:922)
+PortalRun (src/backend/tcop/pquery.c:766)
+exec_simple_query (src/backend/tcop/postgres.c:1278)
+PostgresMain (src/backend/tcop/postgres.c:4767)
+BackendMain (src/backend/tcop/backend_startup.c:105)
+postmaster_child_launch (src/backend/postmaster/launch_backend.c:277)
+BackendStartup (src/backend/postmaster/postmaster.c:3594)
+ServerLoop (src/backend/postmaster/postmaster.c:1676)
+PostmasterMain (src/backend/postmaster/postmaster.c:1374)
+main (src/backend/main/main.c:199)
+start (Unknown Source:0)
