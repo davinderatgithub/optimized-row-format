@@ -13,6 +13,7 @@
 #include "orf_debug.h"
 #include "orf_functions.h"
 #include "orf_utils.h"
+#include "orf_slot_ops.h"
 
 /*
  * Custom logging for optimized row format extension
@@ -152,34 +153,53 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                 if (HeapTupleSatisfiesVisibility(tuple, snapshot, oscan->currBuffer))
                 {
                     /*
-                    * SIMPLIFIED FIX: Always extract all attributes and store as values
-                    * This works with any slot type and avoids slot compatibility issues
+                    * PROJECTION OPTIMIZATION: Use custom slot for lazy extraction
+                    * Only extract attributes when actually requested via slot_getattr()
+                    * This provides true O(1) projection benefits for our optimized format
                     */
                     
                     ORF_DEBUG_INFO(scan, "Found visible tuple at block=%u, offset=%u", oscan->currBlock, oscan->currOffset);
                     
-                    TupleDesc tupdesc = slot->tts_tupleDescriptor;
-                    int natts = tupdesc->natts;
-                    int i;
-                    
-                    ExecClearTuple(slot);
-                    
-                    ORF_DEBUG_VERBOSE(scan, "About to extract %d attributes", natts);
-                    
-                    // Extract all attributes from optimized format and store directly in slot
-                    for (i = 0; i < natts; i++)
+                    /* Check if this is our custom optimized slot type */
+                    if (TTS_IS_OPTIMIZED(slot))
                     {
-                        ORF_DEBUG_VERBOSE(scan, "Extracting attribute %d", i);
-                        //slot->tts_values[i] = optimized_extract_attribute_no_cache(tuple, i + 1, tupdesc, &slot->tts_isnull[i]);
-                        slot->tts_values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, oscan->column_cache, &slot->tts_isnull[i]);
-                        ORF_DEBUG_VERBOSE(scan, "Extracted attribute %d successfully", i);
+                        /*
+                         * OPTIMIZED PATH: Use custom slot for maximum performance
+                         * Store tuple reference for lazy extraction - don't extract anything yet!
+                         */
+                        tts_optimized_store_tuple(slot, tuple, oscan->column_cache);
+                        slot->tts_tid = tuple->t_self;
+                        slot->tts_tableOid = RelationGetRelid(oscan->rel);
+                        
+                        ORF_DEBUG_VERBOSE(scan, "Stored tuple in optimized slot for lazy extraction (tts_nvalid=%d)", 
+                                        slot->tts_nvalid);
                     }
-                    
-                    // Mark slot as having all attributes extracted
-                    slot->tts_flags &= ~TTS_FLAG_EMPTY;
-                    slot->tts_nvalid = natts;
-                    slot->tts_tid = tuple->t_self;
-                    slot->tts_tableOid = RelationGetRelid(oscan->rel);
+                    else
+                    {
+                        /*
+                         * FALLBACK PATH: Extract all attributes for non-optimized slots
+                         * This maintains compatibility with standard PostgreSQL slots
+                         */
+                        TupleDesc tupdesc = slot->tts_tupleDescriptor;
+                        int natts = tupdesc->natts;
+                        int i;
+                        
+                        ExecClearTuple(slot);
+                        
+                        ORF_DEBUG_VERBOSE(scan, "Fallback: extracting all %d attributes for non-optimized slot", natts);
+                        
+                        for (i = 0; i < natts; i++)
+                        {
+                            slot->tts_values[i] = optimized_extract_attribute(tuple, i + 1, tupdesc, oscan->column_cache, &slot->tts_isnull[i]);
+                        }
+                        
+                        slot->tts_flags &= ~TTS_FLAG_EMPTY;
+                        slot->tts_nvalid = natts;
+                        slot->tts_tid = tuple->t_self;
+                        slot->tts_tableOid = RelationGetRelid(oscan->rel);
+                        
+                        ORF_DEBUG_VERBOSE(scan, "Fallback extraction completed, tts_nvalid=%d", slot->tts_nvalid);
+                    }
 
                     /* Advance offset for next call */
                     oscan->currOffset++;

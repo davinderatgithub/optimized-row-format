@@ -52,3 +52,48 @@ ServerLoop (src/backend/postmaster/postmaster.c:1676)
 PostmasterMain (src/backend/postmaster/postmaster.c:1374)
 main (src/backend/main/main.c:199)
 start (Unknown Source:0)
+
+
+--
+tts_optimized_materialize()
+ why are we matirelizing it in standard heap tuple?
+will it cause any performance degradation as conversion from 1 slot format to other?
+
+
+--
+Getting assert here, slot is empty. WHile insert statement is running.
+
+__pthread_kill (Unknown Source:0)
+pthread_kill (Unknown Source:0)
+abort (Unknown Source:0)
+ExceptionalCondition (source/src/backend/utils/error/assert.c:66)
+tts_optimized_materialize (source/contrib/optimized_row_format/orf_slot_ops.c:189)
+ExecMaterializeSlot (source/src/include/executor/tuptable.h:474)
+ExecInsert (source/src/backend/executor/nodeModifyTable.c:791)
+ExecModifyTable (source/src/backend/executor/nodeModifyTable.c:4130)
+ExecProcNodeFirst (source/src/backend/executor/execProcnode.c:464)
+ExecProcNode (source/src/include/executor/executor.h:274)
+ExecutePlan (source/src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (source/src/backend/executor/execMain.c:361)
+ExecutorRun (source/src/backend/executor/execMain.c:307)
+ProcessQuery (source/src/backend/tcop/pquery.c:160)
+PortalRunMulti (source/src/backend/tcop/pquery.c:1275)
+PortalRun (source/src/backend/tcop/pquery.c:789)
+exec_simple_query (source/src/backend/tcop/postgres.c:1278)
+PostgresMain (source/src/backend/tcop/postgres.c:4767)
+BackendMain (source/src/backend/tcop/backend_startup.c:105)
+postmaster_child_launch (source/src/backend/postmaster/launch_backend.c:277)
+
+---
+
+tts_heap_copy_heap_tuple(TupleTableSlot *slot)
+{
+	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+
+	Assert(!TTS_EMPTY(slot));
+	if (!hslot->tuple)
+		tts_heap_materialize(slot);
+
+	return heap_copytuple(hslot->tuple);
+}
+

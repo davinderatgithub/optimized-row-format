@@ -48,9 +48,9 @@ typedef OptimizedScanDescData *OptimizedScanDesc;
 typedef struct OptimizedTupleTableSlot
 {
 	TupleTableSlot base;		/* Base slot structure */
-	HeapTuple opt_tuple;		/* The optimized tuple data */
-	bool *attr_cached;			/* Track which attributes have been extracted */
-	OptimizedColumnMapCache *column_cache;  /* Cache for O(1) attribute access */
+	HeapTuple tuple;			/* The optimized tuple data (renamed for consistency) */
+	bool *tts_extracted;		/* Track which attributes have been extracted */
+	OptimizedColumnMapCache *cache;  /* Cache for O(1) attribute access (renamed for consistency) */
 	
 	/* PERFORMANCE OPTIMIZATION: Cached data to reduce memory indirection */
 	OptimizedTupleHeader cached_header;  /* Cached tuple header */
@@ -58,6 +58,9 @@ typedef struct OptimizedTupleTableSlot
 	uint32 *var_offsets;         		/* Cached pointer to variable offsets array */
 	uint32 var_col_count;        		/* Cached variable column count */
 	bool cache_valid;            		/* Whether cached pointers are valid */
+	
+	/* PROJECTION OPTIMIZATION: Additional fields for smart extraction */
+	AttrNumber highest_requested;		/* Highest attribute ever requested */
 } OptimizedTupleTableSlot;
 
 #define SizeofOptimizedTupleHeader offsetof(HeapTupleHeaderData, t_bits)

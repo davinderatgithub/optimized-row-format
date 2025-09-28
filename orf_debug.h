@@ -15,10 +15,14 @@
  * Debug configuration flags - set to 1 to enable, 0 to disable
  * These can be easily toggled without code changes
  */
-#define ORF_DEBUG_ENABLED 0     /* Master debug switch */
-#define ORF_DEBUG_SCAN 0        /* Scan operation debugging */
-#define ORF_DEBUG_DML 0         /* DML operation debugging */
-#define ORF_DEBUG_UTILS 0       /* Utility function debugging */
+#define ORF_DEBUG_ENABLED 0     /* Master debug switch - DISABLED for performance testing */
+#define ORF_DEBUG_SCAN 1        /* Scan operation debugging */
+#define ORF_DEBUG_DML 1         /* DML operation debugging */
+#define ORF_DEBUG_UTILS 1       /* Utility function debugging */
+#define ORF_DEBUG_slot 1        /* Slot operation debugging */
+#define ORF_DEBUG_scan 1        /* Scan operation debugging (lowercase) */
+#define ORF_DEBUG_dml 1         /* DML operation debugging (lowercase) */
+#define ORF_DEBUG_utils 1       /* Utility function debugging (lowercase) */
 
 /* Debug logging macros */
 #if ORF_DEBUG_ENABLED

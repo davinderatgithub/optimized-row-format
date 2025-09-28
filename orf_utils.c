@@ -16,7 +16,7 @@
  */
 // #define OPTIMIZED_LOG(fmt, ...) \
 //     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) ORF_DEBUG_INFO(utils, fmt, ##__VA_ARGS__)
+#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
 
 /*
  * build_column_cache
@@ -537,23 +537,12 @@ optimized_getattr(HeapTuple tuple, int attnum, TupleDesc tupleDesc, bool *isnull
 OffsetEncodingType
 choose_offset_encoding(Size estimated_tuple_size, int var_col_count)
 {
-    /* Use 16-bit offsets if:
-     * 1. Tuple size is small enough (< 32KB)
-     * 2. We have variable columns to optimize
-     * 3. Offset array would provide meaningful savings
+    /* 
+     * TEMPORARY: Force 32-bit encoding to isolate 16-bit encoding bugs
+     * This is a known working configuration from previous fixes.
      */
-    if (estimated_tuple_size < 32768 && var_col_count > 0 && var_col_count >= 2)
-    {
-        OPTIMIZED_LOG("Using 16-bit offset encoding for tuple size %zu with %d var columns", 
-                     estimated_tuple_size, var_col_count);
-        return OFFSET_ENCODING_16BIT;
-    }
-    
-    OPTIMIZED_LOG("Using 32-bit offset encoding for tuple size %zu with %d var columns", 
-                 estimated_tuple_size, var_col_count);
     return OFFSET_ENCODING_32BIT;
 }
-
 bool
 optimized_relation_needs_toast_table(Relation rel)
 {

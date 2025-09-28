@@ -23,16 +23,19 @@
 #include "orf_dml.h"
 #include "orf_utils.h" /* For choose_offset_encoding */
 
+
 /*
  * build_optimized_tuple_from_slot - Build an optimized tuple from a TupleTableSlot
  *
  * This helper function converts slot data into our optimized tuple format.
- * It's used by both INSERT and UPDATE operations.
+ * It's used by INSERT, UPDATE operations, and virtual slot materialization.
+ * 
+ * If relation is NULL, uses slot->tts_tupleDescriptor directly (for virtual slots).
  */
-static HeapTuple
+HeapTuple
 build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot)
 {
-    TupleDesc tupdesc = RelationGetDescr(relation);
+    TupleDesc tupdesc = relation ? RelationGetDescr(relation) : slot->tts_tupleDescriptor;
     HeapTuple tuple;
     OptimizedTupleHeader header;
     Size len;
@@ -127,7 +130,7 @@ build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot)
     /* Allocate the tuple */
     tuple = (HeapTuple) palloc0(HEAPTUPLESIZE + len);
     tuple->t_len = len;
-    tuple->t_tableOid = RelationGetRelid(relation);
+    tuple->t_tableOid = relation ? RelationGetRelid(relation) : InvalidOid;
     tuple->t_data = (HeapTupleHeader) ((char *) tuple + HEAPTUPLESIZE);
     
     /* Initialize the header */
@@ -246,10 +249,9 @@ build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot)
  * ENABLED for debugging UPDATE crashes
  */
 /* Use the new configurable debug system */
-#define OPTIMIZED_LOG(fmt, ...) ORF_DEBUG_INFO(dml, fmt, ##__VA_ARGS__)
+#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
 
 /* Forward declarations */
-static HeapTuple build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot);
 
 /*
  * optimized_tuple_delete - delete a tuple from an optimized table
@@ -709,13 +711,24 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
     OPTIMIZED_LOG("Starting optimized tuple insert for relation %s",
                   RelationGetRelationName(relation));
+    
 
     /* Pre-allocate arrays to check for nulls */
     isnull_array = (bool *) palloc0(tupdesc->natts * sizeof(bool));
     values_array = (Datum *) palloc(tupdesc->natts * sizeof(Datum));
 
-    /* Get the heap tuple from slot for direct extraction */
-    heap_tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
+    /* 
+     * CORRECT APPROACH: During INSERT operations, PostgreSQL populates the slot's
+     * tts_values and tts_isnull arrays directly from the INSERT statement.
+     * We should extract values from these arrays, not convert to heap format.
+     */
+    
+    
+    /* 
+     * FIXED: The copyslot function now properly materializes slots that have values
+     * but no tuple (INSERT case). We can now safely extract all attributes.
+     */
+    slot_getallattrs(slot);
     
     /* First pass: Check for nulls and count columns */
     for (i = 0; i < tupdesc->natts; i++)
@@ -723,8 +736,9 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
         Form_pg_attribute att = TupleDescAttr(tupdesc, i);
         if (!att->attisdropped)
         {
-            /* Use heap_getattr to extract from heap format data */
-            values_array[i] = heap_getattr(heap_tuple, i + 1, tupdesc, &isnull_array[i]);
+            /* Extract values directly from slot arrays - this preserves our optimized approach */
+            values_array[i] = slot->tts_values[i];
+            isnull_array[i] = slot->tts_isnull[i];
             if (isnull_array[i])
             {
                 hasnull = true;
@@ -879,10 +893,8 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
     
     /* STORAGE ANALYSIS: Compare with heap tuple size for storage efficiency analysis */
     {
-        heap_tuple_size = heap_tuple->t_len;
+        /* Size analysis temporarily disabled - heap_tuple not available during INSERT */
         optimized_tuple_size = len;
-        overhead = optimized_tuple_size - heap_tuple_size;
-        overhead_percent = ((float)overhead / heap_tuple_size) * 100.0f;
         
         /* Calculate component sizes for detailed analysis */
         header_size = SizeofOptimizedTupleHeader;

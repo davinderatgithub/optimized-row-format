@@ -11,6 +11,9 @@
 void optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                             CommandId cid, int options, struct BulkInsertStateData *bistate);
 
+/* Helper function for tuple creation - used by INSERT, UPDATE, and materialization */
+HeapTuple build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot);
+
 TM_Result optimized_tuple_delete(Relation relation, ItemPointer tid,
                                  CommandId cid, Snapshot crosscheck, Snapshot snapshot,
                                  bool wait, TM_FailureData *tmfd, bool changingPart);

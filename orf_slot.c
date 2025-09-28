@@ -10,6 +10,7 @@
 #include "optimized_row_format.h"
 #include "orf_slot.h"
 #include "orf_utils.h"
+#include "orf_slot_ops.h"
 
 /*
  * Custom logging for optimized row format extension
@@ -28,7 +29,7 @@
 void
 optimized_slot_init_cache(OptimizedTupleTableSlot *opt_slot)
 {
-	HeapTuple tuple = opt_slot->opt_tuple;
+	HeapTuple tuple = opt_slot->tuple;
 	char *data_start;
 	uint32 *var_col_count_ptr;
 	
@@ -75,7 +76,7 @@ Datum
 optimized_getattr_direct(OptimizedTupleTableSlot *opt_slot, int attnum, bool *isnull)
 {
 	Form_pg_attribute att = TupleDescAttr(opt_slot->base.tts_tupleDescriptor, attnum - 1);
-	OptimizedColumnMapCache *cache = opt_slot->column_cache;
+	OptimizedColumnMapCache *cache = opt_slot->cache;
 	
 	/* Ensure cache is initialized */
 	if (!opt_slot->cache_valid)
@@ -84,7 +85,7 @@ optimized_getattr_direct(OptimizedTupleTableSlot *opt_slot, int attnum, bool *is
 		if (!opt_slot->cache_valid)
 		{
 			/* Fallback to regular extraction */
-			return optimized_extract_attribute(opt_slot->opt_tuple, attnum, 
+			return optimized_extract_attribute(opt_slot->tuple, attnum, 
 											 opt_slot->base.tts_tupleDescriptor, cache, isnull);
 		}
 	}
@@ -167,9 +168,9 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 		slot->tts_values[0] = optimized_getattr_direct(opt_slot, 1, &slot->tts_isnull[0]);
 		slot->tts_nvalid = 1;
 		
-		/* Mark as cached if we use attr_cached tracking */
-		if (opt_slot->attr_cached)
-			opt_slot->attr_cached[0] = true;
+		/* Mark as cached if we use tts_extracted tracking */
+		if (opt_slot->tts_extracted)
+			opt_slot->tts_extracted[0] = true;
 		
 		OPTIMIZED_LOG("optimized_getsomeattrs: used fast path for single column");
 		return;
@@ -182,20 +183,20 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 	 */
 	
 	/* Ensure we have the attribute cache initialized */
-	if (!opt_slot->attr_cached)
+	if (!opt_slot->tts_extracted)
 	{
-		opt_slot->attr_cached = (bool *) palloc0(
+		opt_slot->tts_extracted = (bool *) palloc0(
 			slot->tts_tupleDescriptor->natts * sizeof(bool));
 	}
 
 	/* Only extract attributes that we haven't cached yet */
 	for (attnum = slot->tts_nvalid + 1; attnum <= natts; attnum++)
 	{
-		if (!opt_slot->attr_cached[attnum - 1])
+		if (!opt_slot->tts_extracted[attnum - 1])
 		{
 			/* Extract this specific attribute on-demand */
 			slot->tts_values[attnum - 1] = optimized_getattr_for_slot(slot, attnum, &slot->tts_isnull[attnum - 1]);
-			opt_slot->attr_cached[attnum - 1] = true;
+			opt_slot->tts_extracted[attnum - 1] = true;
 		}
 	}
 
@@ -207,12 +208,13 @@ Datum
 optimized_getattr_for_slot(TupleTableSlot *slot, int attnum, bool *isnull)
 {
 	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
-	HeapTuple tuple = opt_slot->opt_tuple;
+	HeapTuple tuple = opt_slot->tuple;
 	TupleDesc tupleDesc = slot->tts_tupleDescriptor;
-	OptimizedColumnMapCache *cache = opt_slot->column_cache;
+	OptimizedColumnMapCache *cache = opt_slot->cache;
 
 	/*
 	 * PERFORMANCE OPTIMIZATION: Direct extraction with minimal overhead
+{{ ... }}
 	 * Use our custom optimized_extract_attribute function with O(1) cache lookup
 	 * to read data from the optimized tuple format efficiently.
 	 */
@@ -228,8 +230,8 @@ static void optimized_slot_init(TupleTableSlot *slot)
 {
 	/* Initialize our custom optimized slot */
 	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
-	opt_slot->opt_tuple = NULL;
-	opt_slot->attr_cached = NULL;
+	opt_slot->tuple = NULL;
+	opt_slot->tts_extracted = NULL;
 }
 
 static void optimized_slot_release(TupleTableSlot *slot)
@@ -237,10 +239,10 @@ static void optimized_slot_release(TupleTableSlot *slot)
 	/* Clean up our custom slot resources */
 	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	
-	if (opt_slot->attr_cached)
+	if (opt_slot->tts_extracted)
 	{
-		pfree(opt_slot->attr_cached);
-		opt_slot->attr_cached = NULL;
+		pfree(opt_slot->tts_extracted);
+		opt_slot->tts_extracted = NULL;
 	}
 }
 
@@ -250,10 +252,10 @@ static void optimized_slot_clear(TupleTableSlot *slot)
 
 	if (TTS_SHOULDFREE(slot))
 	{
-		if (opt_slot->opt_tuple)
+		if (opt_slot->tuple)
 		{
-			heap_freetuple(opt_slot->opt_tuple);
-			opt_slot->opt_tuple = NULL;
+			heap_freetuple(opt_slot->tuple);
+			opt_slot->tuple = NULL;
 		}
 		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
 	}
@@ -263,90 +265,19 @@ static void optimized_slot_clear(TupleTableSlot *slot)
 	ItemPointerSetInvalid(&slot->tts_tid);
 	
 	/* Reset attribute cache tracking */
-	if (opt_slot->attr_cached)
+	if (opt_slot->tts_extracted)
 	{
-		memset(opt_slot->attr_cached, false, 
+		memset(opt_slot->tts_extracted, false, 
 			slot->tts_tupleDescriptor->natts * sizeof(bool));
 	}
 }
 
-static void optimized_slot_materialize(TupleTableSlot *slot)
-{
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
-	MemoryContext oldContext;
-	TupleDesc tupdesc;
-	int natts;
-	Datum *values;
-	bool *isnull;
-	int i;
-	HeapTuple heap_tuple;
-
-	Assert(!TTS_EMPTY(slot));
-	
-	if (TTS_SHOULDFREE(slot))
-		return;
-	
-	oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
-	
-	slot->tts_nvalid = 0;
-	hslot->off = 0;
-	
-	if (!hslot->tuple)
-	{
-		/* No tuple yet, create from values/isnull arrays */
-		hslot->tuple = heap_form_tuple(slot->tts_tupleDescriptor,
-									   slot->tts_values,
-									   slot->tts_isnull);
-	}
-	else
-	{
-		/*
-		 * CRITICAL FIX: We have an optimized format tuple, but materialization
-		 * means we need a standard heap tuple (e.g., for ORDER BY operations).
-		 * Convert optimized format to standard heap format.
-		 */
-		tupdesc = slot->tts_tupleDescriptor;
-		natts = tupdesc->natts;
-		values = (Datum *) palloc0(natts * sizeof(Datum));
-		isnull = (bool *) palloc0(natts * sizeof(bool));
-		
-		/* Extract each attribute from optimized format */
-		for (i = 0; i < natts; i++)
-		{
-			values[i] = optimized_extract_attribute_no_cache(hslot->tuple, i + 1, tupdesc, &isnull[i]);
-			
-			/* Handle detoasting for variable-length attributes */
-			if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
-			{
-				values[i] = PointerGetDatum(pg_detoast_datum((struct varlena *) DatumGetPointer(values[i])));
-			}
-		}
-		
-		/* Create a new standard heap tuple from the extracted values */
-		heap_tuple = heap_form_tuple(tupdesc, values, isnull);
-		
-		/* Copy tuple metadata */
-		heap_tuple->t_self = hslot->tuple->t_self;
-		heap_tuple->t_tableOid = hslot->tuple->t_tableOid;
-		
-		/* Replace the optimized tuple with the standard heap tuple */
-		hslot->tuple = heap_tuple;
-		
-		/* Clean up */
-		pfree(values);
-		pfree(isnull);
-	}
-	
-	slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-	
-	MemoryContextSwitchTo(oldContext);
-}
 
 static void optimized_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
 	HeapTuple	tuple;
 	MemoryContext oldcontext;
-	HeapTupleTableSlot *hslot;
+	OptimizedTupleTableSlot *opt_slot;
 
 	oldcontext = MemoryContextSwitchTo(dstslot->tts_mcxt);
 	tuple = ExecCopySlotHeapTuple(srcslot);
@@ -357,15 +288,14 @@ static void optimized_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *src
 	 * Using ExecStoreHeapTuple would fail with "trying to store a heap tuple 
 	 * into wrong type of slot" because it checks TTS_IS_HEAPTUPLE.
 	 */
-	hslot = (HeapTupleTableSlot *) dstslot;
+	opt_slot = (OptimizedTupleTableSlot *) dstslot;
 	
 	/* Clear the destination slot first */
 	ExecClearTuple(dstslot);
 	
 	/* Manually store the tuple data while preserving custom operations */
 	dstslot->tts_nvalid = 0;
-	hslot->tuple = tuple;
-	hslot->off = 0;
+	opt_slot->tuple = tuple;
 	dstslot->tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
 	dstslot->tts_tid = tuple->t_self;
 	dstslot->tts_tableOid = tuple->t_tableOid;
@@ -376,7 +306,7 @@ static void optimized_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *src
 
 static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	bool is_optimized_table;
 	TupleDesc tupdesc;
 	int natts;
@@ -386,8 +316,8 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 	HeapTuple heap_tuple;
 
 	Assert(!TTS_EMPTY(slot));
-	if (!hslot->tuple)
-		optimized_slot_materialize(slot);
+	if (!opt_slot->tuple)
+		tts_optimized_materialize(slot);
 	
 	/*
 	 * CRITICAL FIX: ORDER BY operations call this function expecting standard heap format.
@@ -399,9 +329,9 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 	
 	/* Check if this tuple came from an optimized table */
 	is_optimized_table = false;
-	if (hslot->tuple && hslot->tuple->t_tableOid != InvalidOid)
+	if (opt_slot->tuple && opt_slot->tuple->t_tableOid != InvalidOid)
 	{
-		Relation rel = try_relation_open(hslot->tuple->t_tableOid, NoLock);
+		Relation rel = try_relation_open(opt_slot->tuple->t_tableOid, NoLock);
 		if (rel != NULL)
 		{
 			/* Check if the table uses a non-heap access method (i.e., our optimized AM) */
@@ -424,7 +354,7 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 		/* Extract each attribute from optimized format */
 		for (i = 0; i < natts; i++)
 		{
-			values[i] = optimized_extract_attribute_no_cache(hslot->tuple, i + 1, tupdesc, &isnull[i]);
+			values[i] = optimized_extract_attribute_no_cache(opt_slot->tuple, i + 1, tupdesc, &isnull[i]);
 			
 			/* Handle detoasting for variable-length attributes */
 			if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
@@ -437,8 +367,8 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 		heap_tuple = heap_form_tuple(tupdesc, values, isnull);
 		
 		/* Copy tuple metadata */
-		heap_tuple->t_self = hslot->tuple->t_self;
-		heap_tuple->t_tableOid = hslot->tuple->t_tableOid;
+		heap_tuple->t_self = opt_slot->tuple->t_self;
+		heap_tuple->t_tableOid = opt_slot->tuple->t_tableOid;
 		
 		/* Clean up */
 		pfree(values);
@@ -448,26 +378,26 @@ static HeapTuple optimized_slot_get_heap_tuple(TupleTableSlot *slot)
 	}
 	
 	/* This tuple is already in standard heap format */
-	return hslot->tuple;
+	return opt_slot->tuple;
 }
 
 static HeapTuple optimized_slot_copy_heap_tuple(TupleTableSlot *slot)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	bool is_optimized_table;
 	HeapTuple converted;
 
 	Assert(!TTS_EMPTY(slot));
-	if (!hslot->tuple)
-		optimized_slot_materialize(slot);
+	if (!opt_slot->tuple)
+		tts_optimized_materialize(slot);
 	
 	/*
 	 * Same logic as get_heap_tuple: check if tuple is from optimized table.
 	 */
 	is_optimized_table = false;
-	if (hslot->tuple && hslot->tuple->t_tableOid != InvalidOid)
+	if (opt_slot->tuple && opt_slot->tuple->t_tableOid != InvalidOid)
 	{
-		Relation rel = try_relation_open(hslot->tuple->t_tableOid, NoLock);
+		Relation rel = try_relation_open(opt_slot->tuple->t_tableOid, NoLock);
 		if (rel != NULL)
 		{
 			/* Non-heap AM implies our optimized AM for this table */
@@ -486,12 +416,12 @@ static HeapTuple optimized_slot_copy_heap_tuple(TupleTableSlot *slot)
 		return heap_copytuple(converted);
 	}
 	
-	return heap_copytuple(hslot->tuple);
+	return heap_copytuple(opt_slot->tuple);
 }
 
 static MinimalTuple optimized_slot_copy_minimal_tuple(TupleTableSlot *slot)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	MemoryContext oldcontext;
 	TupleDesc tupdesc;
 	int natts;
@@ -512,7 +442,7 @@ static MinimalTuple optimized_slot_copy_minimal_tuple(TupleTableSlot *slot)
 	/* Extract each attribute from optimized format */
 	for (i = 0; i < natts; i++)
 	{
-		values[i] = optimized_extract_attribute_no_cache(hslot->tuple, i + 1, tupdesc, &isnull[i]);
+		values[i] = optimized_extract_attribute_no_cache(opt_slot->tuple, i + 1, tupdesc, &isnull[i]);
 		
 		/* Handle detoasting for variable-length attributes */
 		if (!isnull[i] && tupdesc->attrs[i].attlen == -1)
@@ -533,16 +463,16 @@ static MinimalTuple optimized_slot_copy_minimal_tuple(TupleTableSlot *slot)
 
 static Datum optimized_slot_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 {
-	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	
 	Assert(!TTS_EMPTY(slot));
 	
-	if (!hslot->tuple)
+	if (!opt_slot->tuple)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot retrieve a system column in this context")));
 	
-	return heap_getsysattr(hslot->tuple, attnum, slot->tts_tupleDescriptor, isnull);
+	return heap_getsysattr(opt_slot->tuple, attnum, slot->tts_tupleDescriptor, isnull);
 }
 
 /*
@@ -557,7 +487,7 @@ static const TupleTableSlotOps TTSOpsOptimized = {
 	.getsomeattrs = optimized_getsomeattrs,		/* Use our custom function */
 	.getsysattr = optimized_slot_getsysattr,	/* Use our wrapper function */
 	.is_current_xact_tuple = slot_is_current_xact_tuple,	/* Use exported function */
-	.materialize = optimized_slot_materialize,
+	.materialize = tts_optimized_materialize,
 	.copyslot = optimized_slot_copyslot,
 	.get_heap_tuple = optimized_slot_get_heap_tuple,
 
@@ -573,13 +503,18 @@ static const TupleTableSlotOps TTSOpsOptimized = {
  * This is called by the PostgreSQL executor to determine what type of slot
  * operations to use for our table AM. This is critical for projection optimization.
  * 
- * CRITICAL FIX: For UPDATE operations, we need to return buffer tuple slot operations
- * to satisfy the TTS_IS_BUFFERTUPLE assertion in heapam_handler.c
+ * PROJECTION OPTIMIZATION: Now returns our custom slot operations for maximum performance.
+ * Our custom slots provide O(1) attribute access and smart extraction logic.
  */
 const TupleTableSlotOps *
 optimized_slot_callbacks(Relation relation)
 {
-    // For now, return heap buffer tuple operations to fix UPDATE crashes
-    // TODO: Implement proper optimized slot operations that are compatible with UPDATE
-    return &TTSOpsBufferHeapTuple; 
+    /*
+     * Return our custom optimized slot operations.
+     * This enables projection optimization through lazy attribute extraction.
+     * 
+     * Note: If this causes issues with INSERT/UPDATE operations, we can add
+     * conditional logic here to return different slot types based on context.
+     */
+    return &TTSOpsOptimizedTuple;
 }

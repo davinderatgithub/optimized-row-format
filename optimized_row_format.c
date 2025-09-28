@@ -59,7 +59,7 @@ optimized_row_format_tableam_handler(PG_FUNCTION_ARGS)
         optimized_tableam.tuple_delete = optimized_tuple_delete;
         optimized_tableam.tuple_update = optimized_tuple_update;
 		optimized_tableam.relation_needs_toast_table = optimized_relation_needs_toast_table;
-		// optimized_tableam.slot_callbacks = optimized_slot_callbacks; // Temporarily disabled for debugging
+		optimized_tableam.slot_callbacks = optimized_slot_callbacks; // ENABLED: Custom slots for projection optimization
 
 		/* Index scan functions */
 		optimized_tableam.index_fetch_begin = optimized_index_fetch_begin;

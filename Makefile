@@ -4,6 +4,7 @@ OBJS = \
     optimized_row_format.o \
     orf_scan.o \
     orf_slot.o \
+    orf_slot_ops.o \
     orf_dml.o \
     orf_utils.o
 
