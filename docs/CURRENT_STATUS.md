@@ -137,6 +137,13 @@
 - **Impact**: Storage efficiency regression
 - **Next Steps**: Optimize offset encoding and alignment
 
+### **Issue 4: Memory Corruption Warning** (HIGH PRIORITY)
+- **Status**: `WARNING: detected write past chunk end in ExecutorState` during SELECT operations
+- **Location**: Appears during performance tests, specifically in SELECT operations
+- **Impact**: Indicates potential memory corruption in executor state management
+- **Evidence**: `psql:sql/performance.sql:162: WARNING: detected write past chunk end in ExecutorState 0x12285fc18`
+- **Next Steps**: Investigate memory allocation and deallocation in slot operations and attribute extraction
+
 ## 📚 **Documentation Status**
 
 ### **Key Documents (Preserved)**

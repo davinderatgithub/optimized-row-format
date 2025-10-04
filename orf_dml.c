@@ -349,7 +349,9 @@ optimized_tuple_delete(Relation relation, ItemPointer tid,
     HeapTupleHeaderSetXmax(tp.t_data, new_xmax);
     HeapTupleHeaderSetCmax(tp.t_data, cid, iscombo);
 
+    ORF_DEBUG_INFO(DML, "DELETE: About to mark buffer dirty for block %u", BufferGetBlockNumber(buffer));
     MarkBufferDirty(buffer);
+    ORF_DEBUG_INFO(DML, "DELETE: Buffer marked dirty successfully for block %u", BufferGetBlockNumber(buffer));
 
     OPTIMIZED_LOG("optimized_tuple_delete: marked tuple as deleted with xmax=%u", new_xmax);
 
@@ -600,9 +602,16 @@ optimized_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot
     }
 
     // 11. MARK BUFFERS DIRTY: Follow heap pattern - newbuf first, then buffer
-    if (newbuf != buffer)
+    ORF_DEBUG_INFO(DML, "UPDATE: About to mark buffers dirty - newbuf=%u, buffer=%u, same=%s", 
+                   BufferGetBlockNumber(newbuf), BufferGetBlockNumber(buffer), 
+                   (newbuf == buffer) ? "true" : "false");
+    if (newbuf != buffer) {
+        ORF_DEBUG_INFO(DML, "UPDATE: Marking newbuf dirty (block %u)", BufferGetBlockNumber(newbuf));
         MarkBufferDirty(newbuf);
+    }
+    ORF_DEBUG_INFO(DML, "UPDATE: Marking buffer dirty (block %u)", BufferGetBlockNumber(buffer));
     MarkBufferDirty(buffer);
+    ORF_DEBUG_INFO(DML, "UPDATE: All buffers marked dirty successfully");
 
     OPTIMIZED_LOG("optimized_tuple_update: atomically updated tuple, old=(%u,%u) -> new=(%u,%u)",
                   ItemPointerGetBlockNumber(otid), ItemPointerGetOffsetNumber(otid),
@@ -1147,7 +1156,9 @@ optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
                   BufferGetBlockNumber(buffer), offnum);
 
     /* Mark the buffer dirty */
+    ORF_DEBUG_INFO(DML, "INSERT: About to mark buffer dirty for block %u", BufferGetBlockNumber(buffer));
     MarkBufferDirty(buffer);
+    ORF_DEBUG_INFO(DML, "INSERT: Buffer marked dirty successfully for block %u", BufferGetBlockNumber(buffer));
 
     /* Release the buffer */
     UnlockReleaseBuffer(buffer);

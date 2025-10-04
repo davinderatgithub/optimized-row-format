@@ -53,6 +53,33 @@ A focused test runner for the many columns scenario:
 2. Extension must be built and installed
 3. User must have database creation privileges
 
+### Run Performance Tests (Current Setup)
+```bash
+# Navigate to build directory and run performance test
+cd /Users/davindersingh/personal/postgres/build/bin
+./psql -d postgres -f ../../source/contrib/optimized_row_format/test/sql/performance.sql
+```
+
+### Alternative: Run from Test Directory
+```bash
+# Navigate to test directory
+cd /Users/davindersingh/personal/postgres/source/contrib/optimized_row_format/test
+
+# Run performance test
+../../../build/bin/psql -d postgres -f sql/performance.sql
+```
+
+### Run Individual Tests
+```bash
+# From test directory
+cd /Users/davindersingh/personal/postgres/source/contrib/optimized_row_format/test
+
+# Run specific tests
+../../../../build/bin/psql -d postgres -f sql/correctness.sql    # Data integrity
+../../../../build/bin/psql -d postgres -f sql/smoke.sql         # Basic functionality  
+../../../../build/bin/psql -d postgres -f sql/performance.sql   # Performance benchmarks
+```
+
 ### Run Quick Test (Recommended for first-time testing)
 ```bash
 cd test

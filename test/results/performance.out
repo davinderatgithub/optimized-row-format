@@ -1,0 +1,59 @@
+Timing is on.
+=== Creating optimized_row_format extension ===
+psql:sql/performance.sql:9: NOTICE:  extension "optimized_row_format" already exists, skipping
+CREATE EXTENSION
+Time: 0.296 ms
+=== Verifying extension availability ===
+     extension_status      
+---------------------------
+ ✅ Extension is available
+(1 row)
+
+Time: 0.906 ms
+=== Cleaning up previous test tables ===
+DROP TABLE
+Time: 3.014 ms
+DROP TABLE
+Time: 1.896 ms
+DROP TABLE
+Time: 1.804 ms
+DROP TABLE
+Time: 0.692 ms
+psql:sql/performance.sql:27: NOTICE:  table "test_heap_fixed" does not exist, skipping
+DROP TABLE
+Time: 0.098 ms
+psql:sql/performance.sql:28: NOTICE:  table "test_optimized_fixed" does not exist, skipping
+DROP TABLE
+Time: 0.075 ms
+psql:sql/performance.sql:29: NOTICE:  table "test_heap_var" does not exist, skipping
+DROP TABLE
+Time: 0.073 ms
+psql:sql/performance.sql:30: NOTICE:  table "test_optimized_var" does not exist, skipping
+DROP TABLE
+Time: 0.070 ms
+DROP TABLE
+Time: 1.886 ms
+DROP TABLE
+Time: 1.812 ms
+=== SECTION 1: GENERAL PERFORMANCE BENCHMARKS ===
+--- Setting up general performance test tables ---
+CREATE TABLE
+Time: 3.847 ms
+CREATE TABLE
+Time: 1.177 ms
+CREATE TABLE
+Time: 2.425 ms
+CREATE TABLE
+Time: 0.585 ms
+--- Test 1.1: INSERT Performance (Mixed Data Types) ---
+psql:sql/performance.sql:134: NOTICE:  INSERT Performance (10,000 mixed-type rows):
+psql:sql/performance.sql:134: NOTICE:    Heap format: 00:00:00.277721
+psql:sql/performance.sql:134: NOTICE:    Optimized format: 00:00:00.219451
+psql:sql/performance.sql:134: NOTICE:    Speedup: 1.2655262450387558x
+DO
+Time: 499.617 ms
+--- Test 1.2: SELECT Performance (Mixed Data Types) ---
+psql:sql/performance.sql:162: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+psql:sql/performance.sql:162: error: connection to server was lost

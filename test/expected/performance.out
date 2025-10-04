@@ -1,3 +1,111 @@
+Timing is on.
+=== Creating optimized_row_format extension ===
+psql:sql/performance.sql:9: NOTICE:  extension "optimized_row_format" already exists, skipping
+CREATE EXTENSION
+Time: 0.478 ms
+=== Verifying extension availability ===
+     extension_status      
+---------------------------
+ ✅ Extension is available
+(1 row)
 
+Time: 1.088 ms
+=== Cleaning up previous test tables ===
+DROP TABLE
+Time: 3.630 ms
+DROP TABLE
+Time: 2.370 ms
+DROP TABLE
+Time: 1.951 ms
+DROP TABLE
+Time: 0.754 ms
+psql:sql/performance.sql:27: NOTICE:  table "test_heap_fixed" does not exist, skipping
+DROP TABLE
+Time: 0.119 ms
+psql:sql/performance.sql:28: NOTICE:  table "test_optimized_fixed" does not exist, skipping
+DROP TABLE
+Time: 0.075 ms
+psql:sql/performance.sql:29: NOTICE:  table "test_heap_var" does not exist, skipping
+DROP TABLE
+Time: 0.073 ms
+psql:sql/performance.sql:30: NOTICE:  table "test_optimized_var" does not exist, skipping
+DROP TABLE
+Time: 0.072 ms
+DROP TABLE
+Time: 2.166 ms
+DROP TABLE
+Time: 1.756 ms
+=== SECTION 1: GENERAL PERFORMANCE BENCHMARKS ===
+--- Setting up general performance test tables ---
+CREATE TABLE
+Time: 3.609 ms
+CREATE TABLE
+Time: 1.256 ms
+CREATE TABLE
+Time: 2.049 ms
+CREATE TABLE
+Time: 0.556 ms
+--- Test 1.1: INSERT Performance (Mixed Data Types) ---
+psql:sql/performance.sql:134: NOTICE:  INSERT Performance (10,000 mixed-type rows):
+psql:sql/performance.sql:134: NOTICE:    Heap format: 00:00:00.263921
+psql:sql/performance.sql:134: NOTICE:    Optimized format: 00:00:00.217255
+psql:sql/performance.sql:134: NOTICE:    Speedup: 1.2147982785206324x
+DO
+Time: 483.634 ms
+--- Test 1.2: SELECT Performance (Mixed Data Types) ---
+psql:sql/performance.sql:162: WARNING:  detected write past chunk end in ExecutorState 0x10f818018
+psql:sql/performance.sql:162: NOTICE:  SELECT Performance (fixed-length column):
+psql:sql/performance.sql:162: NOTICE:    Heap format: 00:00:00.002655
+psql:sql/performance.sql:162: NOTICE:    Optimized format: 00:00:00.006064
+psql:sql/performance.sql:162: NOTICE:    Speedup: 0.43782981530343007916x
+DO
+Time: 9.153 ms
+--- Test 1.3: NULL Handling Performance ---
+INSERT 0 5000
+Time: 27.052 ms
+INSERT 0 5000
+Time: 10.334 ms
+psql:sql/performance.sql:211: NOTICE:  NULL Checking Performance:
+psql:sql/performance.sql:211: NOTICE:    Heap format: 00:00:00.001084
+psql:sql/performance.sql:211: NOTICE:    Optimized format: 00:00:00.002572
+psql:sql/performance.sql:211: NOTICE:    Speedup: 0.42146189735614307932x
+DO
+Time: 4.062 ms
+=== SECTION 2: MANY-COLUMN PERFORMANCE BENCHMARKS ===
+--- Setting up many-column test tables (100 columns) ---
+CREATE TABLE
+Time: 2.339 ms
+CREATE TABLE
+Time: 1.549 ms
+--- Test 2.1: INSERT Performance (10,000 many-column rows) ---
+psql:sql/performance.sql:268: NOTICE:  INSERT Performance (10,000 many-column rows):
+psql:sql/performance.sql:268: NOTICE:    Heap format: 00:00:00.126595
+psql:sql/performance.sql:268: NOTICE:    Optimized format: 00:00:00.142227
+psql:sql/performance.sql:268: NOTICE:    Speedup: 0.89009119224901038481x
+DO
+Time: 272.850 ms
+--- Test 2.2: Single Column SELECT (Fixed-length) ---
+psql:sql/performance.sql:293: NOTICE:  SELECT col10 (fixed-length):
+psql:sql/performance.sql:293: NOTICE:    Heap: 00:00:00.004659
+psql:sql/performance.sql:293: NOTICE:    Optimized: 00:00:00.008391
+psql:sql/performance.sql:293: NOTICE:    Speedup: 0.55523775473721844834x
+DO
+Time: 13.502 ms
+--- Test 2.3: Single Column SELECT (Variable-length) ---
+psql:sql/performance.sql:318: NOTICE:  SELECT col70 (variable-length):
+psql:sql/performance.sql:318: NOTICE:    Heap: 00:00:00.006003
+psql:sql/performance.sql:318: NOTICE:    Optimized: 00:00:00.012115
+psql:sql/performance.sql:318: NOTICE:    Speedup: 0.49550144449030127941x
+DO
+Time: 18.535 ms
+=== SECTION 3: STORAGE EFFICIENCY ===
+--- Final Storage Comparison ---
+     test_case      | heap_size | optimized_size 
+--------------------+-----------+----------------
+ General Mixed-Type | 2216 kB   | 2192 kB
+ NULL-heavy         | 456 kB    | 456 kB
+ Many Columns       | 7296 kB   | 13 MB
+(3 rows)
 
-
+Time: 0.637 ms
+=== Benchmark Complete ===
