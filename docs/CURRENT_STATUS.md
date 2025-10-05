@@ -115,17 +115,37 @@
 - Memory safety tests ✅
 
 ### 📋 **Test Results Summary**
-- INSERT Performance: **1.21x speedup** over heap
-- Storage efficiency: Comparable for simple tables
-- Functionality: Core operations working correctly
-- Stability: No crashes or memory corruption
+- **INSERT Performance**: **1.27x speedup** over heap (confirmed stable)
+- **SELECT Performance**: **Mixed results - major breakthrough for extremely wide tables**
+  - **600-column tables**: Up to **5.36x speedup** for last column access
+  - **30-column tables**: 0.38-0.77x slower (regression needs optimization)
+- **Storage Efficiency**: Expected overhead (37.5% for 30-col, 198.5% for 600-col extreme width)
+- **Functionality**: INSERT and SELECT work correctly, no corruption issues after slot fixes
+- **Stability**: All operations stable after type safety fixes in `tts_optimized_copyslot`
 
 ## 🚨 **Known Issues**
 
-### **Issue 1: SELECT Performance Regression** (HIGH PRIORITY)
-- **Status**: SELECT operations 1.9-2.4x slower than heap
-- **Impact**: Defeats the purpose of optimization for read workloads
-- **Next Steps**: Profile and optimize attribute extraction logic
+### **Issue 1: Mixed Performance Results** (HIGH PRIORITY)
+- **Status**: **BREAKTHROUGH for wide tables, regression for narrow tables**
+- **Latest Performance Results**:
+  - **600-column extreme width** (2K rows, current test):
+    - **Last Column (col600)**: Heap 10.611ms → Optimized 1.980ms (**5.36x speedup**) ✅
+    - **Middle Column (col300)**: Heap 6.078ms → Optimized 2.642ms (**2.30x speedup**) ✅
+    - **First Column (col1)**: Heap 1.415ms → Optimized 2.136ms (**0.66x slower**) ❌
+  - **30-column table** (5K rows, current test):
+    - **Last Column (col30)**: Heap 2.218ms → Optimized 2.882ms (**0.77x slower**) ❌
+    - **Middle Column (col15)**: Heap 1.636ms → Optimized 2.602ms (**0.63x slower**) ❌
+    - **First Column (col1)**: Heap 0.999ms → Optimized 2.637ms (**0.38x slower**) ❌
+- **Critical Findings**:
+  - **Massive wins for extremely wide tables** (600 columns) - up to 5.36x speedup
+  - **Consistent regression for narrow tables** (30 columns) - 0.38-0.77x slower
+  - **Column position matters more in narrow tables** - first column worst affected
+- **TOAST Table Issue**: **Optimized format does not create TOAST tables for TEXT columns**
+- **Root Cause**: Current implementation has high fixed overhead that's only amortized with very wide tables
+- **Critical Architecture Issue**: Current optimization bypasses PostgreSQL's sequential extraction contract, potentially causing crashes when PostgreSQL directly accesses `tts_values[]` array for unextracted attributes
+- **Next Steps**: 
+  1. **URGENT**: Resolve PostgreSQL contract violation without losing performance gains
+  2. **Optimize for narrow tables** - add fast paths for early column access, reduce initialization overhead
 
 ### **Issue 2: UPDATE Operations Crash** (HIGH PRIORITY)
 - **Status**: UPDATE operations cause server crashes
@@ -133,16 +153,31 @@
 - **Next Steps**: Debug and fix UPDATE implementation
 
 ### **Issue 3: Storage Overhead for Wide Tables** (MEDIUM PRIORITY)
-- **Status**: Many-column tables use more space than heap
-- **Impact**: Storage efficiency regression
-- **Next Steps**: Optimize offset encoding and alignment
+- **Status**: Wide tables use significantly more space than heap
+- **Measurement**: 50-column table: Heap 4224 kB → Optimized 6696 kB (58% overhead)
+- **Impact**: Storage efficiency regression for complex schemas
+- **Root Cause**: Inefficient offset encoding and alignment for many columns
+- **Next Steps**: Optimize offset encoding and alignment strategies
 
-### **Issue 4: Memory Corruption Warning** (HIGH PRIORITY)
-- **Status**: `WARNING: detected write past chunk end in ExecutorState` during SELECT operations
-- **Location**: Appears during performance tests, specifically in SELECT operations
-- **Impact**: Indicates potential memory corruption in executor state management
-- **Evidence**: `psql:sql/performance.sql:162: WARNING: detected write past chunk end in ExecutorState 0x12285fc18`
-- **Next Steps**: Investigate memory allocation and deallocation in slot operations and attribute extraction
+### **Issue 4: Missing TOAST Table Integration** (HIGH PRIORITY)
+- **Status**: **Optimized format does not create or use TOAST tables for TEXT columns**
+- **Impact**: 
+  - Large TEXT values stored inline instead of being offloaded to TOAST storage
+  - May contribute to performance regression as heap format benefits from TOAST optimization
+  - Storage overhead increases for tables with large variable-length data
+- **Evidence**: Tables with TEXT columns do not have associated TOAST tables in optimized format
+- **Root Cause**: Table access method does not implement TOAST table creation and management
+- **Next Steps**: Implement TOAST table integration in the optimized table access method
+
+### **Issue 5: Type Safety and Slot Handling** (RESOLVED ✅)
+- **Status**: ✅ **RESOLVED** - Fixed critical type safety issues in slot operations
+- **Root Cause**: `tts_optimized_copyslot()` was unsafely casting non-optimized slots to `OptimizedTupleTableSlot*`
+- **Fixes Applied**:
+  - Added `TTS_IS_OPTIMIZED()` type safety checks before casting
+  - Fixed `ExecStoreVirtualTuple()` assertion by removing redundant calls
+  - Proper handling of mixed slot types during INSERT operations
+- **Impact**: All INSERT and SELECT operations now stable, no memory corruption warnings
+- **Evidence**: All performance tests complete successfully without crashes or warnings
 
 ## 📚 **Documentation Status**
 

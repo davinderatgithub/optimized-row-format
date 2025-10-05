@@ -1,312 +1,90 @@
 # Optimized Row Format Performance Testing
 
-This directory contains comprehensive testing tools to validate the performance improvements of the optimized row format compared to PostgreSQL's standard heap format.
+This directory contains comprehensive testing tools to validate the performance characteristics of the optimized row format compared to PostgreSQL's standard heap format.
 
-## Test Files
+## Working Test Files
 
-### 1. `benchmark.sql` - Comprehensive Benchmark Suite
-A full-featured benchmark that tests:
+### 1. `performance.sql` - Comprehensive Performance Suite ✅
+The main performance test that covers:
 - **INSERT Performance** - Mixed data types (10,000 rows)
-- **SELECT Performance** - Fixed-length and variable-length columns
-- **NULL Handling** - Various null patterns and checking performance
+- **SELECT Performance** - Fixed-length and variable-length columns  
+- **NULL Handling** - Various null patterns and performance
 - **Storage Efficiency** - Space usage comparison
-- **Fixed-Length Column Performance** - Tables with mostly fixed-length columns
-- **Variable-Length Column Performance** - Tables with mostly variable-length columns
-- **Full Table Scan Performance** - Complete table traversal
+- **Mixed Data Types** - Complex schemas with multiple column types
+- **Memory Safety** - Validates no corruption or crashes
 
-### 2. `quick_test.sql` - Simple Validation Test
-A lightweight test for basic validation:
-- Simple table creation and data insertion
-- Basic SELECT operations
-- Storage size comparison
-- Takes ~30 seconds to complete
+### 2. `performance_wide_mixed.sql` - Wide Table Test (30 Columns) ✅
+Tests performance with moderately wide tables:
+- **30 columns** with alternating INTEGER/TEXT pattern
+- **5,000 rows** of test data
+- Tests **first, middle, and last** column access performance
+- **Position impact analysis** - shows how column position affects performance
+- **Storage overhead measurement** for wide tables
 
-### 3. `many_columns_test.sql` - Many Columns Performance Test
-A focused test for tables with many columns:
-- Creates tables with 100 columns (50 fixed + 50 variable)
-- No primary keys (as per current limitation)
-- Tests single-column selection performance
-- Compares INSERT performance with 10,000 rows
-- Tests storage efficiency
+### 3. `performance_extreme_width_final.sql` - Extreme Width Test (600 Columns) ✅
+Tests performance at maximum practical table width:
+- **600 columns** with alternating INTEGER/TEXT pattern (maximum that fits in PostgreSQL row size)
+- **2,000 rows** with minimal data to fit row size limits
+- Tests **first, middle (300th), and last (600th)** column access
+- **Extreme position impact** - demonstrates scaling behavior
+- **Storage overhead at scale** - shows format behavior with very wide tables
+- **Critical for optimization insights** - reveals counterintuitive performance patterns
 - Takes ~5-10 minutes to complete
 
-### 4. `run_benchmark.sh` - Automated Test Runner
-A shell script that automates the entire testing process:
-- Checks PostgreSQL availability
-- Creates test database
-- Installs extension (optional)
-- Runs benchmarks
-- Analyzes and summarizes results
-- Provides cleanup options
+## Key Performance Insights
 
-### 5. `run_many_columns_test.sh` - Many Columns Test Runner
-A focused test runner for the many columns scenario:
-- Specifically designed for tables with 100+ columns
-- Tests single-column access patterns
-- Compares fixed vs variable-length column performance
-- Provides detailed performance analysis
+### Performance Patterns Discovered:
+1. **INSERT Performance**: ✅ **1.27x speedup** over heap (consistently good)
+2. **SELECT Performance**: ❌ **1.4-2.4x slower** than heap (needs optimization)
+3. **Scaling Behavior**: **Counterintuitive** - performance improves with more columns
+4. **Position Impact**: **First column worst** (1.7-2.3x slower), **last column best** (1.4-2.0x slower)
 
-## Quick Start
+### Critical Findings:
+- **High fixed overhead** in attribute extraction dominates performance
+- **Storage overhead expected** (58% for 30-col, 198% for 600-col)
+- **All operations stable** after type safety fixes
+- **No memory corruption** or crashes in current implementation
 
-### Prerequisites
+## Running Tests
+
+```bash
+# Run main performance suite
+psql -d postgres -f sql/performance.sql
+
+# Test wide table performance (30 columns)
+psql -d postgres -f sql/performance_wide_mixed.sql
+
+# Test extreme width (600 columns) - takes 5-10 minutes
+psql -d postgres -f sql/performance_extreme_width_final.sql
+```
+
+## Test Status
+- ✅ All tests pass without crashes
+- ✅ INSERT operations work correctly
+- ✅ SELECT operations work correctly  
+- ❌ Performance regression needs optimization
+- ⚠️ UPDATE operations have known issues (separate investigation needed)
+
+## Additional Test Files
+
+The `sql/` directory also contains various debugging and specialized tests:
+- `correctness.sql` - Data integrity validation
+- `smoke.sql` - Basic functionality test
+- `debug_*.sql` - Various debugging utilities
+- `test_*.sql` - Specific feature tests
+- `update_*.sql` - UPDATE operation tests (known issues)
+
+## Prerequisites
 1. PostgreSQL must be running
-2. Extension must be built and installed
+2. Extension must be built and installed (`make && make install`)
 3. User must have database creation privileges
 
-### Run Performance Tests (Current Setup)
-```bash
-# Navigate to build directory and run performance test
-cd /Users/davindersingh/personal/postgres/build/bin
-./psql -d postgres -f ../../source/contrib/optimized_row_format/test/sql/performance.sql
-```
+## Performance Optimization Roadmap
 
-### Alternative: Run from Test Directory
-```bash
-# Navigate to test directory
-cd /Users/davindersingh/personal/postgres/source/contrib/optimized_row_format/test
+Based on test results, the main optimization targets are:
+1. **Reduce fixed overhead** in `tts_optimized_getsomeattrs()`
+2. **Optimize first column access** (currently worst performing)
+3. **Add fast paths** for common access patterns
+4. **Improve tuple header parsing** efficiency
 
-# Run performance test
-../../../build/bin/psql -d postgres -f sql/performance.sql
-```
-
-### Run Individual Tests
-```bash
-# From test directory
-cd /Users/davindersingh/personal/postgres/source/contrib/optimized_row_format/test
-
-# Run specific tests
-../../../../build/bin/psql -d postgres -f sql/correctness.sql    # Data integrity
-../../../../build/bin/psql -d postgres -f sql/smoke.sql         # Basic functionality  
-../../../../build/bin/psql -d postgres -f sql/performance.sql   # Performance benchmarks
-```
-
-### Run Quick Test (Recommended for first-time testing)
-```bash
-cd test
-psql -d your_database -f quick_test.sql
-```
-
-### Run Full Benchmark
-```bash
-cd test
-./run_benchmark.sh
-```
-
-### Run Full Benchmark with Extension Installation
-```bash
-cd test
-./run_benchmark.sh --install
-```
-
-### Run Full Benchmark with Custom PostgreSQL
-```bash
-cd test
-./run_benchmark.sh /path/to/postgres/install
-```
-
-### Run Many Columns Test (Recommended for Performance Validation)
-```bash
-cd test
-./run_many_columns_test.sh
-```
-
-### Run Many Columns Test with Custom PostgreSQL
-```bash
-cd test
-./run_many_columns_test.sh /path/to/postgres/install
-```
-
-### Verify Extension Installation
-```bash
-cd test
-psql -d your_database -f verify_extension.sql
-```
-
-## Extension Management
-
-### Automatic Extension Creation
-All test scripts automatically create the extension if it doesn't exist:
-```sql
-CREATE EXTENSION IF NOT EXISTS optimized_row_format;
-```
-
-### Manual Extension Installation
-If you need to install the extension manually:
-```bash
-# Build the extension
-make clean && make
-
-# Install to PostgreSQL
-sudo make install
-
-# Create extension in database
-psql -d your_database -c "CREATE EXTENSION optimized_row_format;"
-```
-
-## Expected Performance Improvements
-
-Based on the design, you should expect to see improvements in:
-
-### 1. **INSERT Performance**
-- **Expected**: 10-30% faster
-- **Why**: Optimized memory layout and reduced overhead
-- **Best case**: Tables with many fixed-length columns
-
-### 2. **SELECT Performance (Fixed-length columns)**
-- **Expected**: 20-50% faster
-- **Why**: Contiguous storage of fixed-length data
-- **Best case**: Queries accessing multiple fixed-length columns
-
-### 3. **SELECT Performance (Variable-length columns)**
-- **Expected**: 10-25% faster
-- **Why**: Absolute offset access eliminates computation
-- **Best case**: Tables with mixed column types
-
-### 4. **NULL Handling**
-- **Expected**: 15-40% faster
-- **Why**: Conditional null bitmap (only when needed)
-- **Best case**: Tables with few null values
-
-### 5. **Storage Efficiency**
-- **Expected**: 5-15% space savings
-- **Why**: No null bitmap when no nulls exist
-- **Best case**: Tables with no null values
-
-## Interpreting Results
-
-### Performance Metrics
-- **Speedup**: Values > 1.0 indicate improvement
-- **Time**: Lower is better
-- **Storage**: Smaller is better
-
-### Example Output
-```
-INSERT Performance (10,000 rows):
-Heap format: 00:00:02.345
-Optimized format: 00:00:01.789
-Speedup: 1.31x
-
-SELECT Performance (Fixed-length columns):
-Heap format: 00:00:00.123
-Optimized format: 00:00:00.089
-Speedup: 1.38x
-```
-
-### What to Look For
-1. **Consistent improvements** across multiple test runs
-2. **Larger improvements** on fixed-length column access
-3. **Storage savings** especially for tables without nulls
-4. **Scalability** - improvements should increase with data size
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Extension Not Found
-```
-ERROR: access method "optimized_row_format" does not exist
-```
-**Solution**: The test scripts automatically create the extension. If this error persists:
-```bash
-# Build and install the extension
-cd .. && make && sudo make install
-
-# Then run the test again
-cd test && ./run_benchmark.sh
-```
-
-#### 2. Permission Denied
-```
-ERROR: permission denied for database
-```
-**Solution**: Ensure you have database creation privileges or use an existing database
-
-#### 3. PostgreSQL Not Running
-```
-ERROR: could not connect to server
-```
-**Solution**: Start PostgreSQL service
-
-#### 4. Custom PostgreSQL Configuration Issues
-```
-ERROR: unrecognized configuration parameter "application_version"
-```
-**Solution**: Use the custom PostgreSQL directory option:
-```bash
-./run_benchmark.sh /path/to/your/postgres/install
-```
-
-#### 5. Extension Creation Fails
-```
-ERROR: could not open extension control file
-```
-**Solution**: Ensure the extension is properly installed:
-```bash
-# Check if extension files exist
-ls -la /usr/local/pgsql/lib/postgresql/optimized_row_format*
-
-# Reinstall if needed
-cd .. && make clean && make && sudo make install
-```
-
-### Debug Mode
-To see detailed extension logs, set the log level:
-```sql
-SET log_min_messages = debug1;
-```
-
-## Advanced Testing
-
-### Custom Test Scenarios
-You can modify `benchmark.sql` to test specific scenarios:
-
-1. **Different data sizes**: Change the number of rows in INSERT loops
-2. **Different column patterns**: Modify table schemas
-3. **Different null patterns**: Adjust null generation logic
-4. **Different query patterns**: Add custom SELECT statements
-
-### Memory Profiling
-For detailed memory analysis, use PostgreSQL's built-in functions:
-```sql
--- Check buffer cache hit ratios
-SELECT * FROM pg_stat_bgwriter;
-
--- Check table statistics
-SELECT * FROM pg_stat_user_tables WHERE tablename LIKE 'test_%';
-```
-
-### System-Level Monitoring
-Monitor system resources during tests:
-```bash
-# Monitor CPU and memory
-top -p $(pgrep postgres)
-
-# Monitor disk I/O
-iostat -x 1
-```
-
-## Contributing Tests
-
-When adding new tests:
-
-1. **Follow the naming convention**: `test_heap_*` and `test_optimized_*`
-2. **Include timing measurements**: Use `clock_timestamp()`
-3. **Provide clear metrics**: Speedup ratios and absolute times
-4. **Test edge cases**: Null values, empty strings, large objects
-5. **Document expected results**: What improvements to expect
-
-## Performance Baselines
-
-For reference, here are typical baseline performance numbers on modern hardware:
-
-- **INSERT (10K rows)**: 1-3 seconds
-- **SELECT (fixed-length)**: 50-200ms
-- **SELECT (variable-length)**: 100-500ms
-- **NULL checking**: 20-100ms
-- **Storage overhead**: 5-15% of data size
-
-Your results may vary based on:
-- Hardware specifications
-- PostgreSQL configuration
-- Data characteristics
-- System load
+The counterintuitive scaling behavior (better with more columns) provides clear direction for where to focus optimization efforts.

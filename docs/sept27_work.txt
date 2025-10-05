@@ -97,3 +97,52 @@ tts_heap_copy_heap_tuple(TupleTableSlot *slot)
 	return heap_copytuple(hslot->tuple);
 }
 
+
+---
+
+errfinish (source/src/backend/utils/error/elog.c:479)
+optimized_extract_attribute (source/contrib/optimized_row_format/orf_utils.c:479)
+tts_optimized_getsomeattrs (source/contrib/optimized_row_format/orf_slot_ops.c:154)
+slot_getsomeattrs_int (source/src/backend/executor/execTuples.c:1999)
+slot_getsomeattrs (source/src/include/executor/tuptable.h:358)
+slot_getallattrs (source/src/include/executor/tuptable.h:370)
+optimized_tuple_insert (source/contrib/optimized_row_format/orf_dml.c:740)
+table_tuple_insert (source/src/include/access/tableam.h:1406)
+ExecInsert (source/src/backend/executor/nodeModifyTable.c:1139)
+ExecModifyTable (source/src/backend/executor/nodeModifyTable.c:4130)
+ExecProcNodeFirst (source/src/backend/executor/execProcnode.c:464)
+ExecProcNode (source/src/include/executor/executor.h:274)
+ExecutePlan (source/src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (source/src/backend/executor/execMain.c:361)
+ExecutorRun (source/src/backend/executor/execMain.c:307)
+ProcessQuery (source/src/backend/tcop/pquery.c:160)
+PortalRunMulti (source/src/backend/tcop/pquery.c:1275)
+PortalRun (source/src/backend/tcop/pquery.c:789)
+exec_simple_query (source/src/backend/tcop/postgres.c:1278)
+PostgresMain (source/src/backend/tcop/postgres.c:4767)
+
+
+next error callstack is this.
+
+__pthread_kill (Unknown Source:0)
+pthread_kill (Unknown Source:0)
+abort (Unknown Source:0)
+ExceptionalCondition (source/src/backend/utils/error/assert.c:66)
+ExecStoreVirtualTuple (source/src/backend/executor/execTuples.c:1646)
+tts_optimized_copyslot (source/contrib/optimized_row_format/orf_slot_ops.c:290)
+ExecCopySlot (source/src/include/executor/tuptable.h:516)
+ExecGetInsertNewTuple (source/src/backend/executor/nodeModifyTable.c:691)
+ExecModifyTable (source/src/backend/executor/nodeModifyTable.c:4129)
+ExecProcNodeFirst (source/src/backend/executor/execProcnode.c:464)
+ExecProcNode (source/src/include/executor/executor.h:274)
+ExecutePlan (source/src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (source/src/backend/executor/execMain.c:361)
+ExecutorRun (source/src/backend/executor/execMain.c:307)
+ProcessQuery (source/src/backend/tcop/pquery.c:160)
+PortalRunMulti (source/src/backend/tcop/pquery.c:1275)
+PortalRun (source/src/backend/tcop/pquery.c:789)
+exec_simple_query (source/src/backend/tcop/postgres.c:1278)
+PostgresMain (source/src/backend/tcop/postgres.c:4767)
+BackendMain (source/src/backend/tcop/backend_startup.c:105)
+
+Is there any missing step before calling ExecStoreVirtualTuple?

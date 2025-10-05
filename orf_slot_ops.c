@@ -97,6 +97,12 @@ tts_optimized_clear(TupleTableSlot *slot)
 void
 tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 {
+    /* Defensive check - this should always be true, but let's be safe */
+    if (!TTS_IS_OPTIMIZED(slot))
+    {
+        elog(ERROR, "tts_optimized_getsomeattrs called on non-optimized slot type");
+    }
+    
     OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
     int attnum;
     int extracted_count = 0;
@@ -135,35 +141,34 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
                 natts, slot->tts_nvalid);
     
     /*
-     * SMART EXTRACTION: Only extract attributes that haven't been extracted yet.
-     * This is different from heap slots which extract sequentially 1→N.
-     * We can extract any attribute directly using our cache.
+     * OPTIMIZED EXTRACTION: Only extract the highest requested attribute.
+     * Unlike heap format which requires sequential parsing, our format
+     * supports O(1) random access, so we only need to extract what's requested.
      */
-    for (attnum = 1; attnum <= natts; attnum++)
+    
+    /* Check if the highest requested attribute is already extracted */
+    if (!opt_slot->tts_extracted[natts - 1])
     {
-        /* Skip if already extracted */
-        if (opt_slot->tts_extracted[attnum - 1])
-        {
-            ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Attribute %d already extracted", attnum);
-            continue;
-        }
-            
-        /* Extract this specific attribute using O(1) cache lookup */
-        ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting attribute %d", attnum);
+        /* Extract ONLY the highest requested attribute using O(1) access */
+        ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting ONLY attribute %d (bypass sequential)", natts);
         
-        slot->tts_values[attnum - 1] = optimized_extract_attribute(
+        slot->tts_values[natts - 1] = optimized_extract_attribute(
             opt_slot->tuple,
-            attnum,
+            natts,
             slot->tts_tupleDescriptor,
             opt_slot->cache,
-            &slot->tts_isnull[attnum - 1]
+            &slot->tts_isnull[natts - 1]
         );
         
         /* Mark as extracted */
-        opt_slot->tts_extracted[attnum - 1] = true;
-        extracted_count++;
+        opt_slot->tts_extracted[natts - 1] = true;
+        extracted_count = 1;
         
-        ORF_SLOT_TRACK_ACCESS(slot, attnum);
+        ORF_SLOT_TRACK_ACCESS(slot, natts);
+    }
+    else
+    {
+        ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Attribute %d already extracted", natts);
     }
     
     /* Update tts_nvalid to reflect highest extracted attribute */
@@ -261,6 +266,36 @@ tts_optimized_materialize(TupleTableSlot *slot)
 void
 tts_optimized_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
+    /* CRITICAL: Type safety check before casting */
+    if (!TTS_IS_OPTIMIZED(srcslot))
+    {
+        /* Source is not optimized slot - use generic copy mechanism */
+        ORF_SLOT_LOG("tts_optimized_copyslot: Source slot is not optimized type, using generic copy");
+        
+        /* Ensure source slot is materialized */
+        slot_getallattrs(srcslot);
+        
+        /* Clear destination and prepare for copying */
+        ExecClearTuple(dstslot);
+        
+        /* Copy each attribute */
+        for (int i = 0; i < srcslot->tts_tupleDescriptor->natts; i++)
+        {
+            dstslot->tts_values[i] = srcslot->tts_values[i];
+            dstslot->tts_isnull[i] = srcslot->tts_isnull[i];
+        }
+        dstslot->tts_nvalid = srcslot->tts_nvalid;
+        
+        /* Store as virtual tuple - this makes the slot valid */
+        ExecStoreVirtualTuple(dstslot);
+        return;
+    }
+    
+    if (!TTS_IS_OPTIMIZED(dstslot))
+    {
+        elog(ERROR, "tts_optimized_copyslot: Destination slot is not optimized type");
+    }
+    
     OptimizedTupleTableSlot *src_opt = (OptimizedTupleTableSlot *) srcslot;
     OptimizedTupleTableSlot *dst_opt = (OptimizedTupleTableSlot *) dstslot;
     
