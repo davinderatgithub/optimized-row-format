@@ -14,6 +14,7 @@
 #include "orf_functions.h"
 #include "orf_utils.h"
 #include "orf_slot_ops.h"
+#include "orf_scan.h"
 
 /*
  * Custom logging for optimized row format extension
@@ -163,6 +164,12 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                     /* Check if this is our custom optimized slot type */
                     if (TTS_IS_OPTIMIZED(slot))
                     {
+                        OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
+                        Oid relid = RelationGetRelid(oscan->rel);
+
+                        /* Look up the attribute bitmap from the registry */
+                        opt_slot->attrs_used = orf_registry_lookup(relid);
+
                         /*
                          * OPTIMIZED PATH: Use custom slot for maximum performance
                          * Store tuple reference for lazy extraction - don't extract anything yet!

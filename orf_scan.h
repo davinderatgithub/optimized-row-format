@@ -5,6 +5,11 @@
 #include "access/relscan.h"
 #include "access/skey.h"
 #include "access/tableam.h"
+#include "nodes/execnodes.h"
+#include "nodes/bitmapset.h"
+
+/* Bitmap registry function (defined in orf_hooks.c) */
+extern Bitmapset *orf_registry_lookup(Oid relid);
 
 /* Scan-related function declarations */
 TableScanDesc optimized_scan_begin(Relation rel, Snapshot snapshot,

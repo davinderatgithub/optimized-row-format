@@ -6,7 +6,8 @@ OBJS = \
     orf_slot.o \
     orf_slot_ops.o \
     orf_dml.o \
-    orf_utils.o
+    orf_utils.o \
+    orf_hooks.o
 
 EXTENSION = optimized_row_format
 DATA = sql/optimized_row_format--1.0.sql

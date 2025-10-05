@@ -61,6 +61,7 @@ typedef struct OptimizedTupleTableSlot
 	
 	/* PROJECTION OPTIMIZATION: Additional fields for smart extraction */
 	AttrNumber highest_requested;		/* Highest attribute ever requested */
+	Bitmapset *attrs_used;			/* Bitmap of attributes needed for this tuple */
 } OptimizedTupleTableSlot;
 
 #define SizeofOptimizedTupleHeader offsetof(HeapTupleHeaderData, t_bits)

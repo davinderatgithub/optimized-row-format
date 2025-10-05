@@ -10,6 +10,8 @@
 #include "access/htup_details.h"
 #include "executor/tuptable.h"
 #include "utils/memutils.h"
+#include "nodes/execnodes.h"
+#include "orf_scan.h"
 
 #include "orf_slot_ops.h"
 #include "orf_utils.h"
@@ -139,36 +141,63 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
     
     ORF_SLOT_LOG("tts_optimized_getsomeattrs: Extracting up to %d attributes (current tts_nvalid=%d)", 
                 natts, slot->tts_nvalid);
-    
+
     /*
-     * OPTIMIZED EXTRACTION: Only extract the highest requested attribute.
-     * Unlike heap format which requires sequential parsing, our format
-     * supports O(1) random access, so we only need to extract what's requested.
+     * SMART EXTRACTION: Use the attribute bitmap if available.
+     * This allows us to extract only the columns actually needed by the query.
      */
-    
-    /* Check if the highest requested attribute is already extracted */
-    if (!opt_slot->tts_extracted[natts - 1])
+    if (opt_slot->attrs_used)
     {
-        /* Extract ONLY the highest requested attribute using O(1) access */
-        ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting ONLY attribute %d (bypass sequential)", natts);
-        
-        slot->tts_values[natts - 1] = optimized_extract_attribute(
-            opt_slot->tuple,
-            natts,
-            slot->tts_tupleDescriptor,
-            opt_slot->cache,
-            &slot->tts_isnull[natts - 1]
-        );
-        
-        /* Mark as extracted */
-        opt_slot->tts_extracted[natts - 1] = true;
-        extracted_count = 1;
-        
-        ORF_SLOT_TRACK_ACCESS(slot, natts);
+        /* We have a bitmap, so use it to extract only the needed attributes */
+        int att_to_extract = -1;
+        while ((att_to_extract = bms_next_member(opt_slot->attrs_used, att_to_extract)) >= 0)
+        {
+            if (att_to_extract > 0 && att_to_extract <= natts)
+            {
+                if (opt_slot->tts_extracted && opt_slot->tts_extracted[att_to_extract - 1])
+                    continue;
+
+                ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting attribute %d (bitmap)", att_to_extract);
+                slot->tts_values[att_to_extract - 1] = optimized_extract_attribute(
+                    opt_slot->tuple,
+                    att_to_extract,
+                    slot->tts_tupleDescriptor,
+                    opt_slot->cache,
+                    &slot->tts_isnull[att_to_extract - 1]
+                );
+
+                if (opt_slot->tts_extracted)
+                    opt_slot->tts_extracted[att_to_extract - 1] = true;
+                extracted_count++;
+                ORF_SLOT_TRACK_ACCESS(slot, att_to_extract);
+            }
+        }
     }
     else
     {
-        ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Attribute %d already extracted", natts);
+        /*
+         * Fallback: Extract all attributes up to natts to maintain PostgreSQL contract.
+         * This ensures we don't break anything if the bitmap is not available.
+         */
+        for (attnum = slot->tts_nvalid + 1; attnum <= natts; attnum++)
+        {
+            if (opt_slot->tts_extracted && opt_slot->tts_extracted[attnum - 1])
+                continue;
+
+            ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting attribute %d (fallback)", attnum);
+            slot->tts_values[attnum - 1] = optimized_extract_attribute(
+                opt_slot->tuple,
+                attnum,
+                slot->tts_tupleDescriptor,
+                opt_slot->cache,
+                &slot->tts_isnull[attnum - 1]
+            );
+
+            if (opt_slot->tts_extracted)
+                opt_slot->tts_extracted[attnum - 1] = true;
+            extracted_count++;
+            ORF_SLOT_TRACK_ACCESS(slot, attnum);
+        }
     }
     
     /* Update tts_nvalid to reflect highest extracted attribute */
@@ -183,13 +212,20 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
                 extracted_count, slot->tts_nvalid);
 }
 
+/*
+ * tts_optimized_getsysattr
+ * 
+ * Get a system attribute from the tuple.
+ * System attributes are stored in the heap tuple header.
+ */
 Datum
 tts_optimized_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 {
     OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
-    
+
     Assert(!TTS_EMPTY(slot));
-    
+    Assert(opt_slot->tuple != NULL);
+
     /* System attributes are stored in the heap tuple header, same as heap */
     return heap_getsysattr(opt_slot->tuple, attnum, 
                           slot->tts_tupleDescriptor, isnull);
