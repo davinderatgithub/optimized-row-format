@@ -186,28 +186,69 @@ Successfully implemented the **bitmap registry system** to resolve the critical 
 ## 🚨 **Known Issues**
 
 ### **Issue 0: Tuple Materialization Crash** (CRITICAL - BLOCKING)
-- **Status**: **Server crashes during aggregate operations on large datasets**
+- **Status**: **Server crashes during aggregate operations with WHERE clauses**
 - **Severity**: Critical - Blocks all performance validation
 - **Symptoms**:
-  - Crashes in `AllocSetFree` during COUNT/SUM operations
-  - Error: `TRAP: failed Assert("AllocBlockIsValid(block)")` in `aset.c:1121`
-  - Stack trace: `ExecForceStoreHeapTuple` → `agg_retrieve_direct` → `ExecAgg`
+  - Multiple error patterns observed:
+    1. `TRAP: failed Assert("(data - start) == data_size")` in `heaptuple.c:441`
+    2. `TRAP: failed Assert("bms_is_valid_set(a)")` in `bitmapset.c:1312`
+    3. `ERROR: unsupported format code: 32639`
+    4. Memory corruption: `detected write past chunk end in ExecutorState`
+  - Stack trace: `heap_form_tuple` → `tts_optimized_materialize` → `ExecForceStoreHeapTuple` → `agg_retrieve_direct`
 - **Impact**:
   - Cannot run full performance benchmarks
   - Cannot test 600-column wide tables
   - Cannot validate 5.36x speedup target
   - Blocks production readiness
-- **Root Cause**: Memory management issue in tuple materialization
-  - Likely in `tts_optimized_materialize()` or `tts_optimized_get_heap_tuple()`
-  - Possible double-free or use-after-free
-  - Incorrect memory context for tuple allocation
-- **Workaround**: Works fine on small datasets (<1000 rows)
+- **Root Cause Analysis** (Oct 6, 2025):
+  - **Primary Issue**: `tts_optimized_get_heap_tuple()` returns optimized format tuple instead of heap format
+  - **Secondary Issue**: Smart extraction with bitmap leaves some attributes unextracted
+  - **Tertiary Issue**: When materializing, garbage values in `slot->tts_values[]` for unextracted attributes
+  - **Debug Finding**: `varlen = VARSIZE_ANY(DatumGetPointer(value))` returns 534740992 (0x1FE00000 - garbage)
+  - Location: `build_optimized_tuple_from_slot()` line 244 in `orf_dml.c`
+- **Reproduction Steps**:
+  ```sql
+  CREATE EXTENSION optimized_row_format;
+  
+  CREATE TABLE test_crash (
+      id INTEGER,
+      small_int SMALLINT,
+      regular_int INTEGER,
+      big_int BIGINT,
+      text_col TEXT,
+      varchar_col VARCHAR(100),
+      float_col REAL,
+      double_col DOUBLE PRECISION,
+      bool_col BOOLEAN,
+      date_col DATE,
+      timestamp_col TIMESTAMP,
+      json_col JSONB
+  ) USING optimized_row_format;
+  
+  -- Insert 10,000 rows
+  INSERT INTO test_crash (id, small_int, regular_int, big_int, text_col, varchar_col,
+                         float_col, double_col, bool_col, date_col, timestamp_col, json_col)
+  SELECT 
+      i, (i % 32767)::SMALLINT, i, i::BIGINT * 1000,
+      'This is a test text column for row ' || i, 'Varchar content ' || i,
+      i * 1.5, i * 2.5, (i % 2)::BOOLEAN, CURRENT_DATE + (i % 365),
+      CURRENT_TIMESTAMP + (i || ' seconds')::INTERVAL,
+      ('{"key": "value", "number": ' || i || '}')::JSONB
+  FROM generate_series(1, 10000) i;
+  
+  -- This works
+  SELECT COUNT(*) FROM test_crash;
+  
+  -- This crashes
+  SELECT COUNT(*) FROM test_crash WHERE regular_int % 2 = 0;
+  ```
+- **Workaround**: Works fine on small datasets (<100 rows) or without WHERE clause
 - **Next Steps**:
-  1. Add memory context assertions in materialize functions
-  2. Review tuple ownership and lifecycle
-  3. Check for double-free patterns
-  4. Validate memory context usage
-- **Note**: This is NOT related to smart extraction - it's an existing bug in tuple handling
+  1. Fix `tts_optimized_get_heap_tuple()` to return proper heap format tuple
+  2. Ensure smart extraction extracts ALL attributes when materializing
+  3. Add validation for extracted Datum values before using in `build_optimized_tuple_from_slot()`
+  4. Review memory context usage for bitmap storage
+- **Note**: Smart extraction bitmap detection works correctly, but materialization path has bugs
 
 ### **Issue 1: Mixed Performance Results** (HIGH PRIORITY - PENDING VALIDATION)
 - **Status**: **Cannot validate due to crash (Issue 0)**

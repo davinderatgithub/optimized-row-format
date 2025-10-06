@@ -146,3 +146,61 @@ PostgresMain (source/src/backend/tcop/postgres.c:4767)
 BackendMain (source/src/backend/tcop/backend_startup.c:105)
 
 Is there any missing step before calling ExecStoreVirtualTuple?
+
+----
+Here is call stack for this
+
+MakeExpandedObjectReadOnlyInternal (source/src/backend/utils/adt/expandeddatum.c:100)
+ExecInterpExpr (source/src/backend/executor/execExprInterp.c:704)
+ExecInterpExprStillValid (source/src/backend/executor/execExprInterp.c:1927)
+ExecEvalExprSwitchContext (source/src/include/executor/executor.h:356)
+ExecProject (source/src/include/executor/executor.h:390)
+ExecScan (source/src/backend/executor/execScan.c:236)
+ExecSeqScan (source/src/backend/executor/nodeSeqscan.c:112)
+ExecProcNodeFirst (source/src/backend/executor/execProcnode.c:464)
+ExecProcNode (source/src/include/executor/executor.h:274)
+ExecutePlan (source/src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (source/src/backend/executor/execMain.c:361)
+ExecutorRun (source/src/backend/executor/execMain.c:307)
+PortalRunSelect (source/src/backend/tcop/pquery.c:922)
+PortalRun (source/src/backend/tcop/pquery.c:766)
+exec_simple_query (source/src/backend/tcop/postgres.c:1278)
+PostgresMain (source/src/backend/tcop/postgres.c:4767)
+BackendMain (source/src/backend/tcop/backend_startup.c:105)
+postmaster_child_launch (source/src/backend/postmaster/launch_backend.c:277)
+BackendStartup (source/src/backend/postmaster/postmaster.c:3594)
+ServerLoop (source/src/backend/postmaster/postmaster.c:1676)
+
+
+---
+error is coming while accessing last attribute of tuple.
+this varlen getting calculated to 534740992.
+from this statement :  varlen = VARSIZE_ANY(DatumGetPointer(value));
+this value is copied here         Datum value = slot->tts_values[i];
+log:
+2025-10-06 19:28:54.992 IST [40883] LOG:  invalid record length at 0/38AF430: expected at least 24, got 0
+2025-10-06 19:28:54.992 IST [40883] LOG:  redo done at 0/38AF3F8 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+
+callstack
+
+_platform_memmove (Unknown Source:0)
+build_optimized_tuple_from_slot (source/contrib/optimized_row_format/orf_dml.c:222)
+tts_optimized_materialize (source/contrib/optimized_row_format/orf_slot_ops.c:290)
+ExecMaterializeSlot (source/src/include/executor/tuptable.h:474)
+ExecForceStoreHeapTuple (source/src/backend/executor/execTuples.c:1588)
+agg_retrieve_direct (source/src/backend/executor/nodeAgg.c:2430)
+ExecAgg (source/src/backend/executor/nodeAgg.c:2179)
+ExecProcNodeFirst (source/src/backend/executor/execProcnode.c:464)
+ExecProcNode (source/src/include/executor/executor.h:274)
+ExecutePlan (source/src/backend/executor/execMain.c:1649)
+standard_ExecutorRun (source/src/backend/executor/execMain.c:361)
+ExecutorRun (source/src/backend/executor/execMain.c:307)
+PortalRunSelect (source/src/backend/tcop/pquery.c:922)
+PortalRun (source/src/backend/tcop/pquery.c:766)
+exec_simple_query (source/src/backend/tcop/postgres.c:1278)
+PostgresMain (source/src/backend/tcop/postgres.c:4767)
+BackendMain (source/src/backend/tcop/backend_startup.c:105)
+postmaster_child_launch (source/src/backend/postmaster/launch_backend.c:277)
+BackendStartup (source/src/backend/postmaster/postmaster.c:3594)
+ServerLoop (source/src/backend/postmaster/postmaster.c:1676)
+
