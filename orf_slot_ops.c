@@ -145,19 +145,39 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
     /*
      * SMART EXTRACTION: Use the attribute bitmap if available.
      * This allows us to extract only the columns actually needed by the query.
+     * 
+     * CRITICAL FIX: When bitmap is available, extract ALL bitmap columns regardless
+     * of natts parameter. The bitmap represents what the query actually needs, while
+     * natts is just PostgreSQL's sequential extraction hint.
+     * 
+     * Example: COUNT(*) WHERE col3 = 42
+     * - Bitmap contains: (b 3)
+     * - PostgreSQL may call getsomeattrs(slot, 1) first
+     * - We MUST extract column 3 anyway, not skip it because 3 > 1
      */
     if (opt_slot->attrs_used)
     {
         /* We have a bitmap, so use it to extract only the needed attributes */
         int att_to_extract = -1;
+        int highest_extracted = slot->tts_nvalid;
+        
+        ORF_SLOT_LOG("tts_optimized_getsomeattrs: Using bitmap extraction (natts=%d, current tts_nvalid=%d)", 
+                    natts, slot->tts_nvalid);
+        
         while ((att_to_extract = bms_next_member(opt_slot->attrs_used, att_to_extract)) >= 0)
         {
-            if (att_to_extract > 0 && att_to_extract <= natts)
+            /* Extract all bitmap columns, regardless of natts */
+            if (att_to_extract > 0 && att_to_extract <= slot->tts_tupleDescriptor->natts)
             {
+                /* Skip if already extracted */
                 if (opt_slot->tts_extracted && opt_slot->tts_extracted[att_to_extract - 1])
+                {
+                    ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Attribute %d already extracted (bitmap)", att_to_extract);
                     continue;
+                }
 
-                ORF_SLOT_VERBOSE("tts_optimized_getsomeattrs: Extracting attribute %d (bitmap)", att_to_extract);
+                ORF_SLOT_LOG("tts_optimized_getsomeattrs: Extracting attribute %d (bitmap, natts=%d)", 
+                            att_to_extract, natts);
                 slot->tts_values[att_to_extract - 1] = optimized_extract_attribute(
                     opt_slot->tuple,
                     att_to_extract,
@@ -169,8 +189,21 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
                 if (opt_slot->tts_extracted)
                     opt_slot->tts_extracted[att_to_extract - 1] = true;
                 extracted_count++;
+                
+                /* Track highest extracted column for tts_nvalid update */
+                if (att_to_extract > highest_extracted)
+                    highest_extracted = att_to_extract;
+                    
                 ORF_SLOT_TRACK_ACCESS(slot, att_to_extract);
             }
+        }
+        
+        /* Update tts_nvalid to highest extracted column (critical for PostgreSQL contract) */
+        if (highest_extracted > slot->tts_nvalid)
+        {
+            ORF_SLOT_LOG("tts_optimized_getsomeattrs: Updating tts_nvalid from %d to %d (bitmap extraction)", 
+                        slot->tts_nvalid, highest_extracted);
+            slot->tts_nvalid = highest_extracted;
         }
     }
     else
@@ -179,6 +212,8 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
          * Fallback: Extract all attributes up to natts to maintain PostgreSQL contract.
          * This ensures we don't break anything if the bitmap is not available.
          */
+        ORF_SLOT_LOG("tts_optimized_getsomeattrs: Using fallback extraction (no bitmap, natts=%d)", natts);
+        
         for (attnum = slot->tts_nvalid + 1; attnum <= natts; attnum++)
         {
             if (opt_slot->tts_extracted && opt_slot->tts_extracted[attnum - 1])
@@ -198,11 +233,11 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
             extracted_count++;
             ORF_SLOT_TRACK_ACCESS(slot, attnum);
         }
+        
+        /* Update tts_nvalid to reflect highest extracted attribute */
+        if (natts > slot->tts_nvalid)
+            slot->tts_nvalid = natts;
     }
-    
-    /* Update tts_nvalid to reflect highest extracted attribute */
-    if (natts > slot->tts_nvalid)
-        slot->tts_nvalid = natts;
         
     /* Update highest requested tracking */
     if (natts > opt_slot->highest_requested)
@@ -276,19 +311,30 @@ tts_optimized_materialize(TupleTableSlot *slot)
     {
         /*
          * VIRTUAL SLOT PATH: No physical tuple available
-         * 
+         *
          * This is a legitimate scenario that occurs when:
          * 1. Slot contains computed/projected values (SELECT col1+col2)
          * 2. Join results combining multiple tables
          * 3. Virtual tuples created by executor nodes
          * 4. Trigger processing with modified tuples
          * 5. INSERT operations where values are set but no tuple exists yet
-         * 
-         * We create an optimized tuple from the slot's extracted values.
-         * This preserves our optimized format even for virtual slots.
+         *
+         * SMART MATERIALIZATION: Use bitmap-aware function to avoid extracting all attributes
          */
-        opt_slot->tuple = build_optimized_tuple_from_slot(NULL, slot);
-        ORF_SLOT_LOG("tts_optimized_materialize: Created optimized tuple from virtual slot data");
+
+        if (opt_slot->attrs_used != NULL)
+        {
+            /* SMART PATH: Only materialize attributes in bitmap */
+            opt_slot->tuple = build_optimized_tuple_from_slot_selective(NULL, slot, opt_slot->attrs_used);
+            ORF_SLOT_LOG("tts_optimized_materialize: Created optimized tuple using smart materialization (bitmap-aware)");
+        }
+        else
+        {
+            /* FALLBACK PATH: No bitmap available, use traditional approach */
+            slot_getallattrs(slot);  /* Ensure all attributes extracted for safety */
+            opt_slot->tuple = build_optimized_tuple_from_slot(NULL, slot);
+            ORF_SLOT_LOG("tts_optimized_materialize: Created optimized tuple using fallback materialization (full extraction)");
+        }
     }
     
     MemoryContextSwitchTo(oldContext);
