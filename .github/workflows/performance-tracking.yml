@@ -1,0 +1,69 @@
+name: Performance Tracking
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  track-performance:
+    name: Track Performance Metrics
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-17 postgresql-server-dev-17
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s $USER
+      
+      - name: Build extension
+        run: |
+          make clean
+          make
+          sudo make install
+      
+      - name: Run performance tests with timing
+        run: |
+          echo "=== Performance Test Run: $(date) ===" > performance_report.txt
+          echo "Commit: ${{ github.sha }}" >> performance_report.txt
+          echo "" >> performance_report.txt
+          
+          # Run main performance suite
+          echo "### Main Performance Suite ###" >> performance_report.txt
+          psql -U postgres -d postgres -f test/sql/performance.sql >> performance_report.txt 2>&1
+          
+          # Run 30-column test
+          echo "" >> performance_report.txt
+          echo "### 30-Column Wide Table Test ###" >> performance_report.txt
+          psql -U postgres -d postgres -f test/sql/performance_wide_mixed.sql >> performance_report.txt 2>&1
+          
+          # Extract key metrics
+          echo "" >> performance_report.txt
+          echo "### Key Metrics Summary ###" >> performance_report.txt
+          grep -E "(INSERT|SELECT|Storage)" performance_report.txt | tail -20 >> performance_report.txt || true
+      
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report-${{ github.sha }}
+          path: performance_report.txt
+          retention-days: 90
+      
+      - name: Check for performance regression
+        run: |
+          # Extract INSERT performance ratio
+          INSERT_RATIO=$(grep -oP "INSERT.*?(\d+\.\d+)x" performance_report.txt | grep -oP "\d+\.\d+" | head -1 || echo "0")
+          
+          # Fail if INSERT performance drops below 1.0x (slower than heap)
+          if (( $(echo "$INSERT_RATIO < 1.0" | bc -l) )); then
+            echo "❌ Performance regression detected: INSERT is ${INSERT_RATIO}x (should be >= 1.0x)"
+            exit 1
+          else
+            echo "✅ Performance acceptable: INSERT is ${INSERT_RATIO}x"
+          fi

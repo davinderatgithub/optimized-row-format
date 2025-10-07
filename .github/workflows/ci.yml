@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg_version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        pg_version: [14, 15, 16, 17]
+        include:
+          - os: macos-latest
+            pg_version: 17
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.pg_version }} postgresql-server-dev-${{ matrix.pg_version }}
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s $USER
+      
+      - name: Install PostgreSQL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@${{ matrix.pg_version }}
+          brew services start postgresql@${{ matrix.pg_version }}
+          echo "/opt/homebrew/opt/postgresql@${{ matrix.pg_version }}/bin" >> $GITHUB_PATH
+          sleep 5
+          createuser -s postgres || true
+      
+      - name: Build extension
+        run: |
+          make clean
+          make
+          sudo make install
+      
+      - name: Run smoke tests
+        run: |
+          psql -U postgres -d postgres -f test/sql/smoke.sql
+      
+      - name: Run correctness tests
+        run: |
+          psql -U postgres -d postgres -f test/sql/correctness.sql
+      
+      - name: Run basic functionality tests
+        run: |
+          psql -U postgres -d postgres -f test/sql/optimized_row_format.sql
+      
+      - name: Run performance tests
+        run: |
+          psql -U postgres -d postgres -f test/sql/performance.sql
+      
+      - name: Run smart extraction tests
+        run: |
+          psql -U postgres -d postgres -f test/sql/smart_extraction_test.sql
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-pg${{ matrix.pg_version }}-${{ matrix.os }}
+          path: |
+            test/expected/*.out
+            test/results/*.out
+          retention-days: 7
+
+  performance-benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-17 postgresql-server-dev-17
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s $USER
+      
+      - name: Build extension
+        run: |
+          make clean
+          make
+          sudo make install
+      
+      - name: Run wide table benchmark (30 columns)
+        run: |
+          psql -U postgres -d postgres -f test/sql/performance_wide_mixed.sql > benchmark_30col.txt
+      
+      - name: Run extreme width benchmark (600 columns)
+        run: |
+          timeout 600 psql -U postgres -d postgres -f test/sql/performance_extreme_width_final.sql > benchmark_600col.txt || echo "Benchmark timed out or crashed"
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark_*.txt
+          retention-days: 30
+
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check for common issues
+        run: |
+          # Check for trailing whitespace
+          ! git grep -n '[[:space:]]$' -- '*.c' '*.h'
+          
+          # Check for tabs in SQL files
+          ! git grep -n $'\t' -- '*.sql'
+          
+          # Check for TODO/FIXME comments
+          git grep -n 'TODO\|FIXME' -- '*.c' '*.h' || true
+      
+      - name: Verify documentation exists
+        run: |
+          test -f README.md
+          test -f docs/CURRENT_STATUS.md
+          test -f CLAUDE.md
