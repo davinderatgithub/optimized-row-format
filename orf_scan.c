@@ -170,6 +170,17 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                         /* Look up the attribute bitmap from the registry */
                         opt_slot->attrs_used = orf_registry_lookup(relid);
 
+                        /* DEBUG: Check if bitmap was found (using debug logging system) */
+                        #if ORF_DEBUG_ENABLED && ORF_DEBUG_SCAN
+                        if (opt_slot->attrs_used) {
+                            char *bitmap_str = bmsToString(opt_slot->attrs_used);
+                            elog(NOTICE, "ORF_DEBUG[SCAN]: Retrieved bitmap for relation %u: %s", relid, bitmap_str);
+                            pfree(bitmap_str);
+                        } else {
+                            elog(NOTICE, "ORF_DEBUG[SCAN]: No bitmap found for relation %u", relid);
+                        }
+                        #endif
+
                         /*
                          * OPTIMIZED PATH: Use custom slot for maximum performance
                          * Store tuple reference for lazy extraction - don't extract anything yet!
