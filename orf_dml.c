@@ -245,6 +245,249 @@ build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot)
 }
 
 /*
+ * build_optimized_tuple_from_slot_selective - Build optimized tuple from slot (bitmap-aware)
+ *
+ * This function is similar to build_optimized_tuple_from_slot but only processes
+ * attributes specified in the attrs_bitmap. This is crucial for smart extraction
+ * where only a subset of attributes are extracted into the slot.
+ *
+ * For attributes not in the bitmap:
+ * - They are treated as NULL in the resulting tuple
+ * - No attempt is made to access slot->tts_values[i] for these attributes
+ * - This prevents crashes when slot contains garbage values for unextracted attributes
+ */
+HeapTuple
+build_optimized_tuple_from_slot_selective(Relation relation, TupleTableSlot *slot, Bitmapset *attrs_bitmap)
+{
+    TupleDesc tupdesc = relation ? RelationGetDescr(relation) : slot->tts_tupleDescriptor;
+
+    /* DEBUG: Log what we're materializing */
+    if (attrs_bitmap) {
+        char *bitmap_str = bmsToString(attrs_bitmap);
+        elog(WARNING, "ORF DEBUG: Selective materialization with bitmap: %s", bitmap_str);
+        pfree(bitmap_str);
+    } else {
+        elog(WARNING, "ORF DEBUG: Selective materialization with NULL bitmap");
+    }
+    HeapTuple tuple;
+    OptimizedTupleHeader header;
+    Size len;
+    Size fixed_data_len = 0;
+    Size var_data_len = 0;
+    int var_col_count = 0;
+    int i;
+    char *fixed_data;
+    char *var_data;
+    uint32 *var_offsets = NULL;
+    int fixed_pos = 0;
+    int var_pos = 0;
+    char *null_bitmap = NULL;
+    int var_col_index = 0;
+    bool hasnull = false;
+    uint32 *var_col_count_ptr;
+    Size base_offset;
+    Size varlen;
+    OffsetEncodingType offset_encoding;
+    Size offset_size;
+    Size var_offsets_size;
+    uint32 absolute_offset;
+
+    /* CRITICAL: Do NOT call slot_getallattrs() - that defeats smart extraction purpose */
+
+    /* First pass: Check for nulls and calculate sizes (ONLY for bitmap attributes) */
+    for (i = 0; i < tupdesc->natts; i++)
+    {
+        Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+        if (att->attisdropped)
+            continue;
+
+        /* Check if this attribute is in the bitmap */
+        if (attrs_bitmap != NULL && !bms_is_member(i + 1, attrs_bitmap))
+        {
+            /* Not in bitmap - treat as NULL */
+            elog(WARNING, "ORF DEBUG: Column %d (%s) not in bitmap, treating as NULL",
+                 i + 1, NameStr(att->attname));
+            hasnull = true;
+            continue;
+        }
+
+        elog(WARNING, "ORF DEBUG: Processing column %d (%s) - attlen=%d, isnull=%s",
+             i + 1, NameStr(att->attname), att->attlen, slot->tts_isnull[i] ? "true" : "false");
+
+        /* In bitmap - process normally but check if actually extracted */
+        if (slot->tts_isnull[i])
+        {
+            hasnull = true;
+        }
+        else if (att->attlen > 0)
+        {
+            /* Fixed-length column */
+            elog(WARNING, "ORF DEBUG: Fixed-length column %d, adding %d bytes", i + 1, att->attlen);
+            fixed_data_len += att->attlen;
+        }
+        else
+        {
+            /* Variable-length column that is not NULL */
+            elog(WARNING, "ORF DEBUG: Variable-length column %d, accessing slot->tts_values[%d]", i + 1, i);
+            var_col_count++;
+
+            if (att->attlen == -1)  /* varlena */
+            {
+                /* CRITICAL: This is where the crash happens if value is garbage */
+                Datum value = slot->tts_values[i];
+                elog(WARNING, "ORF DEBUG: About to call VARSIZE_ANY on varlena column %d", i + 1);
+                varlen = VARSIZE_ANY(DatumGetPointer(value));
+                elog(WARNING, "ORF DEBUG: VARSIZE_ANY returned %zu for column %d", varlen, i + 1);
+                var_data_len += varlen;
+            }
+            else  /* cstring */
+            {
+                /* CRITICAL: This could also crash if value is garbage */
+                Datum value = slot->tts_values[i];
+                elog(WARNING, "ORF DEBUG: About to call strlen on cstring column %d", i + 1);
+                varlen = strlen(DatumGetCString(value)) + 1;
+                elog(WARNING, "ORF DEBUG: strlen returned %zu for column %d", varlen, i + 1);
+                var_data_len += varlen;
+            }
+        }
+    }
+
+    /* Calculate encoding and sizes (same as original) */
+    offset_encoding = choose_offset_encoding(fixed_data_len + var_data_len + 1000, var_col_count);
+    offset_size = (offset_encoding == OFFSET_ENCODING_16BIT) ? sizeof(uint16) : sizeof(uint32);
+    var_offsets_size = MAXALIGN(var_col_count * offset_size);
+
+    /* Calculate total tuple length */
+    len = SizeofOptimizedTupleHeader;
+    if (hasnull)
+        len += BITMAPLEN(tupdesc->natts);
+    len = MAXALIGN(len);
+    len += MAXALIGN(sizeof(uint32));  /* var_col_count */
+    len += var_offsets_size;          /* variable offsets */
+    len += MAXALIGN(fixed_data_len);  /* fixed-length data */
+    len += var_data_len;              /* variable-length data */
+
+    /* Allocate and initialize tuple */
+    tuple = palloc0(HEAPTUPLESIZE + len);
+    tuple->t_len = len;
+    tuple->t_data = (OptimizedTupleHeader) ((char *) tuple + HEAPTUPLESIZE);
+
+    header = tuple->t_data;
+    header->t_infomask = 0;
+    header->t_infomask2 = tupdesc->natts;
+
+    if (offset_encoding == OFFSET_ENCODING_16BIT)
+        header->t_infomask2 |= OPTIMIZED_OFFSET_16BIT;
+
+    if (hasnull)
+    {
+        header->t_infomask |= HEAP_HASNULL;
+        null_bitmap = (char *) header + SizeofOptimizedTupleHeader;
+        header->t_hoff = SizeofOptimizedTupleHeader + BITMAPLEN(tupdesc->natts);
+    }
+    else
+    {
+        header->t_hoff = SizeofOptimizedTupleHeader;
+    }
+    header->t_hoff = MAXALIGN(header->t_hoff);
+
+    /* Set up pointers for data sections */
+    if (var_col_count > 0)
+    {
+        char *data_start = (char *) header + header->t_hoff;
+        var_col_count_ptr = (uint32 *) MAXALIGN(data_start);
+        var_offsets = (uint32 *) ((char *)var_col_count_ptr + MAXALIGN(sizeof(uint32)));
+        *var_col_count_ptr = var_col_count;
+    }
+
+    /* Calculate data pointers */
+    size_t offset_array_size = (offset_encoding == OFFSET_ENCODING_16BIT) ?
+        MAXALIGN(var_col_count * sizeof(uint16)) :
+        MAXALIGN(var_col_count * sizeof(uint32));
+    fixed_data = (char *) (var_offsets) + offset_array_size;
+    var_data = fixed_data + MAXALIGN(fixed_data_len);
+    base_offset = (char *)fixed_data - (char *)header;
+
+    /* Second pass: Copy data (ONLY for bitmap attributes) */
+    for (i = 0; i < tupdesc->natts; i++)
+    {
+        Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+        if (att->attisdropped)
+            continue;
+
+        /* Handle null bitmap for ALL attributes (bitmap and non-bitmap) */
+        if (hasnull && null_bitmap != NULL)
+        {
+            /* Check if in bitmap and not null */
+            if (attrs_bitmap != NULL && bms_is_member(i + 1, attrs_bitmap) && !slot->tts_isnull[i])
+                null_bitmap[i >> 3] |= (1 << (i & 0x07));
+            /* For non-bitmap attributes, leave as NULL (default 0) */
+        }
+
+        /* Skip processing if not in bitmap */
+        if (attrs_bitmap != NULL && !bms_is_member(i + 1, attrs_bitmap))
+            continue;
+
+        /* Skip if null */
+        if (slot->tts_isnull[i])
+            continue;
+
+        /* Process attribute normally - we know it's safe to access slot->tts_values[i] */
+        Datum value = slot->tts_values[i];
+
+        if (att->attlen > 0)
+        {
+            /* Fixed-length column */
+            if (att->attbyval)
+            {
+                store_att_byval(fixed_data + fixed_pos, value, att->attlen);
+            }
+            else
+            {
+                memcpy(fixed_data + fixed_pos, DatumGetPointer(value), att->attlen);
+            }
+            fixed_pos += att->attlen;
+        }
+        else
+        {
+            /* Variable-length column */
+            if (att->attlen == -1)  /* varlena */
+            {
+                varlen = VARSIZE_ANY(DatumGetPointer(value));
+                memcpy(var_data + var_pos, DatumGetPointer(value), varlen);
+            }
+            else  /* cstring */
+            {
+                varlen = strlen(DatumGetCString(value)) + 1;
+                memcpy(var_data + var_pos, DatumGetCString(value), varlen);
+            }
+
+            /* Store offset with encoding support */
+            absolute_offset = base_offset + MAXALIGN(fixed_data_len) + var_pos;
+
+            if (offset_encoding == OFFSET_ENCODING_16BIT)
+            {
+                if (absolute_offset > 65535)
+                {
+                    pfree(tuple);
+                    elog(ERROR, "Offset %u exceeds 16-bit limit in optimized tuple", absolute_offset);
+                }
+                ((uint16 *)var_offsets)[var_col_index] = (uint16)absolute_offset;
+            }
+            else
+            {
+                var_offsets[var_col_index] = absolute_offset;
+            }
+
+            var_pos += varlen;
+            var_col_index++;
+        }
+    }
+
+    return tuple;
+}
+
+/*
  * Custom logging for optimized row format extension
  * ENABLED for debugging UPDATE crashes
  */

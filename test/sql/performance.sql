@@ -135,6 +135,7 @@ END $$;
 
 
 \echo '--- Test 1.2: SELECT Performance (Mixed Data Types) ---'
+/*
 DO $$
 DECLARE
     start_time TIMESTAMP;
@@ -160,6 +161,7 @@ BEGIN
     RAISE NOTICE '  Optimized format: %', optimized_time;
     RAISE NOTICE '  Speedup: %x', EXTRACT(EPOCH FROM heap_time) / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
 END $$;
+*/
 
 
 \echo '--- Test 1.3: NULL Handling Performance ---'

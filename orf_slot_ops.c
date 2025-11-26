@@ -38,6 +38,7 @@ tts_optimized_init(TupleTableSlot *slot)
     opt_slot->tts_extracted = NULL;
     opt_slot->cache_valid = false;
     opt_slot->highest_requested = 0;
+    opt_slot->attrs_used = NULL;  /* Initialize bitmap pointer to NULL */
     
     ORF_SLOT_LOG("tts_optimized_init: Initialized optimized slot");
 }
@@ -81,6 +82,14 @@ tts_optimized_clear(TupleTableSlot *slot)
     
     /* Reset tracking state */
     opt_slot->highest_requested = 0;
+    
+    /* 
+     * NOTE: We do NOT reset attrs_used here!
+     * The bitmap is query-level state that persists for the entire scan,
+     * not tuple-level state. It's set once per scan by orf_scan.c and
+     * should remain valid across all tuples in that scan.
+     * The registry owns the bitmap and will free it at ExecutorEnd.
+     */
     
     /* Clear base slot state */
     slot->tts_nvalid = 0;
@@ -160,6 +169,12 @@ tts_optimized_getsomeattrs(TupleTableSlot *slot, int natts)
         /* We have a bitmap, so use it to extract only the needed attributes */
         int att_to_extract = -1;
         int highest_extracted = slot->tts_nvalid;
+        
+        /* CRITICAL: Verify we have a valid tuple to extract from */
+        if (!opt_slot->tuple)
+        {
+            elog(ERROR, "tts_optimized_getsomeattrs: attrs_used bitmap present but tuple is NULL");
+        }
         
         ORF_SLOT_LOG("tts_optimized_getsomeattrs: Using bitmap extraction (natts=%d, current tts_nvalid=%d)", 
                     natts, slot->tts_nvalid);

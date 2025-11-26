@@ -6,6 +6,7 @@
 #include "access/xact.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "nodes/bitmapset.h"
 
 /* Function declarations for DML operations */
 void optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
@@ -13,6 +14,9 @@ void optimized_tuple_insert(Relation relation, TupleTableSlot *slot,
 
 /* Helper function for tuple creation - used by INSERT, UPDATE, and materialization */
 HeapTuple build_optimized_tuple_from_slot(Relation relation, TupleTableSlot *slot);
+
+/* Selective tuple creation - only processes attributes in the bitmap */
+HeapTuple build_optimized_tuple_from_slot_selective(Relation relation, TupleTableSlot *slot, Bitmapset *attrs_bitmap);
 
 TM_Result optimized_tuple_delete(Relation relation, ItemPointer tid,
                                  CommandId cid, Snapshot crosscheck, Snapshot snapshot,

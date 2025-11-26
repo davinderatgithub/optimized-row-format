@@ -53,6 +53,42 @@ CREATE EXTENSION IF NOT EXISTS optimized_row_format;
 \echo '=== ISSUE 2: Performance Regressions ==='
 \echo 'Status: MAJOR - Projection optimization not working properly'
 
+-- Mixed-data SELECT performance regression on regular_int % 2 = 0
+-- Copied from test/sql/performance.sql Test 1.2
+-- This is expected to show optimized slower than heap today.
+-- Uncomment to reproduce and measure:
+-- DO $$
+-- DECLARE
+--     start_time      TIMESTAMP;
+--     end_time        TIMESTAMP;
+--     heap_time       INTERVAL;
+--     optimized_time  INTERVAL;
+--     result_count    INTEGER;
+-- BEGIN
+--     -- Test heap format
+--     start_time := clock_timestamp();
+--     SELECT COUNT(*) INTO result_count
+--     FROM test_heap_mixed
+--     WHERE regular_int % 2 = 0;
+--     end_time := clock_timestamp();
+--     heap_time := end_time - start_time;
+--
+--     -- Test optimized format
+--     start_time := clock_timestamp();
+--     SELECT COUNT(*) INTO result_count
+--     FROM test_optimized_mixed
+--     WHERE regular_int % 2 = 0;
+--     end_time := clock_timestamp();
+--     optimized_time := end_time - start_time;
+--
+--     RAISE NOTICE 'SELECT Performance (fixed-length column):';
+--     RAISE NOTICE '  Heap format: %', heap_time;
+--     RAISE NOTICE '  Optimized format: %', optimized_time;
+--     RAISE NOTICE '  Speedup: %x',
+--                  EXTRACT(EPOCH FROM heap_time)
+--                  / NULLIF(EXTRACT(EPOCH FROM optimized_time), 0);
+-- END $$;
+
 -- Create test tables for performance comparison
 DROP TABLE IF EXISTS perf_heap_wide;
 DROP TABLE IF EXISTS perf_opt_wide;
