@@ -10,13 +10,7 @@
 #include "orf_debug.h"
 #include "orf_functions.h"
 
-/*
- * Custom logging for optimized row format extension
- * DISABLED for testing - uncomment to enable debugging
- */
-// #define OPTIMIZED_LOG(fmt, ...) \
-//     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
+/* Debug logging uses orf_debug.h macros: ORF_DEBUG_INFO, ORF_DEBUG_VERBOSE */
 
 /*
  * build_column_cache
@@ -32,7 +26,7 @@ build_column_cache(TupleDesc tupleDesc)
 	Size current_fixed_offset = 0;
 	MemoryContext oldcontext;
 	
-	OPTIMIZED_LOG("build_column_cache: Building cache for %d attributes", tupleDesc->natts);
+	ORF_DEBUG_INFO(utils, "build_column_cache: Building cache for %d attributes", tupleDesc->natts);
 	
 	/* 
 	 * CRITICAL FIX: Allocate cache in CacheMemoryContext to prevent it from being
@@ -69,7 +63,7 @@ build_column_cache(TupleDesc tupleDesc)
 			cache->var_indexes[i] = -1; /* Not a variable column */
 			current_fixed_offset += att->attlen;
 			
-			OPTIMIZED_LOG("build_column_cache: Column %d (%s) fixed-length, offset=%u", 
+			ORF_DEBUG_VERBOSE(utils, "build_column_cache: Column %d (%s) fixed-length, offset=%u", 
 						  i + 1, NameStr(att->attname), cache->fixed_offsets[i]);
 		}
 		else /* Variable-length column */
@@ -77,7 +71,7 @@ build_column_cache(TupleDesc tupleDesc)
 			cache->fixed_offsets[i] = UINT32_MAX; /* Not a fixed column */
 			cache->var_indexes[i] = var_col_index++;
 			
-			OPTIMIZED_LOG("build_column_cache: Column %d (%s) variable-length, var_index=%d", 
+			ORF_DEBUG_VERBOSE(utils, "build_column_cache: Column %d (%s) variable-length, var_index=%d", 
 						  i + 1, NameStr(att->attname), cache->var_indexes[i]);
 		}
 	}
@@ -85,7 +79,7 @@ build_column_cache(TupleDesc tupleDesc)
 	cache->fixed_data_len = current_fixed_offset;
 	cache->var_col_count = var_col_index;
 	
-	OPTIMIZED_LOG("build_column_cache: Cache built - fixed_data_len=%zu, var_col_count=%d", 
+	ORF_DEBUG_INFO(utils, "build_column_cache: Cache built - fixed_data_len=%zu, var_col_count=%d", 
 				  cache->fixed_data_len, cache->var_col_count);
 	
 	return cache;
@@ -295,7 +289,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
          * FALLBACK: O(N) computation when cache is unavailable
          * This is slower but ensures correctness
          */
-        OPTIMIZED_LOG("optimized_extract_attribute: Cache invalid, using O(N) fallback");
+        ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: Cache invalid, using O(N) fallback");
         
         for (i = 0; i < tupleDesc->natts; i++)
         {
@@ -318,7 +312,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             }
         }
         
-        OPTIMIZED_LOG("optimized_extract_attribute: O(N) computed fixed_off=%u, var_index=%d", fixed_off, target_var_index);
+        ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: O(N) computed fixed_off=%u, var_index=%d", fixed_off, target_var_index);
     }
     else
     {
@@ -328,12 +322,12 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
         if (att->attlen > 0) /* Fixed-length column */
         {
             fixed_off = cache->fixed_offsets[attnum - 1];
-            OPTIMIZED_LOG("optimized_extract_attribute: Fixed column, cached offset=%u", fixed_off);
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: Fixed column, cached offset=%u", fixed_off);
         }
         else /* Variable-length column */
         {
             target_var_index = cache->var_indexes[attnum - 1];
-            OPTIMIZED_LOG("optimized_extract_attribute: Variable column, cached var_index=%d", target_var_index);
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: Variable column, cached var_index=%d", target_var_index);
         }
     }
 
@@ -354,7 +348,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
     var_col_count = *var_col_count_ptr;
     var_offsets = (uint32 *) ((char *) var_col_count_ptr + MAXALIGN(sizeof(uint32)));
 
-    OPTIMIZED_LOG("optimized_extract_attribute: var_col_count=%u, natts=%d, hasnulls=%d",
+    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: var_col_count=%u, natts=%d, hasnulls=%d",
          var_col_count, tupleDesc->natts, HeapTupleHasNulls(tuple));
 
     /* Fixed data starts immediately after the variable offsets array */
@@ -365,7 +359,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
     size_t offset_size = (encoding == OFFSET_ENCODING_16BIT) ? sizeof(uint16) : sizeof(uint32);
     fixed_data = (char *)var_offsets + MAXALIGN(var_col_count * offset_size);
 
-    OPTIMIZED_LOG("optimized_extract_attribute: fixed_data=%p", fixed_data);
+    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: fixed_data=%p", fixed_data);
 
     /* Check if this specific attribute is NULL using the null bitmap */
     if (null_bitmap != NULL)
@@ -394,7 +388,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
 #endif
         
         data_ptr = fixed_data + fixed_off;
-        OPTIMIZED_LOG("optimized_extract_attribute: fixed column, offset=%u", fixed_off);
+        ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: fixed column, offset=%u", fixed_off);
 
         if (att->attbyval)
         {
@@ -403,20 +397,20 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             {
                 case sizeof(char):
                     val = *((char *) data_ptr);
-                    OPTIMIZED_LOG("optimized_extract_attribute: char value=%d", val);
+                    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: char value=%d", val);
                     return CharGetDatum(val);
                 case sizeof(int16):
                     val16 = *((int16 *) data_ptr);
-                    OPTIMIZED_LOG("optimized_extract_attribute: int16 value=%d", val16);
+                    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: int16 value=%d", val16);
                     return Int16GetDatum(val16);
                 case sizeof(int32):
                     val32 = *((int32 *) data_ptr);
-                    OPTIMIZED_LOG("optimized_extract_attribute: int32 value=%d", val32);
+                    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: int32 value=%d", val32);
                     return Int32GetDatum(val32);
 #if SIZEOF_DATUM == 8
                 case sizeof(Datum):
                     val_datum = *((Datum *) data_ptr);
-                    OPTIMIZED_LOG("optimized_extract_attribute: Datum value=%ld", val_datum);
+                    ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: Datum value=%ld", val_datum);
                     return val_datum;
 #endif
                 default:
@@ -427,14 +421,14 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
         else
         {
             /* Pass-by-reference: return pointer to the data */
-            OPTIMIZED_LOG("optimized_extract_attribute: fixed pass-by-ref, data_ptr=%p", data_ptr);
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: fixed pass-by-ref, data_ptr=%p", data_ptr);
             return PointerGetDatum(data_ptr);
         }
     }
     /* Handle variable-length columns */
     else
     {
-        OPTIMIZED_LOG("optimized_extract_attribute: variable column, var_index=%d", target_var_index);
+        ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: variable column, var_index=%d", target_var_index);
 
         /* Get the data from the variable section using the absolute offset */
         if (target_var_index < var_col_count)
@@ -447,15 +441,15 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             if (encoding == OFFSET_ENCODING_16BIT) {
                 uint16 *var_offsets_16 = (uint16 *) var_offsets;
                 absolute_offset = var_offsets_16[target_var_index];
-                OPTIMIZED_LOG("16-bit offset read: var_offsets=%p, var_offsets_16=%p, target_var_index=%d, raw_value=%u", 
+                ORF_DEBUG_VERBOSE(utils, "16-bit offset read: var_offsets=%p, var_offsets_16=%p, target_var_index=%d, raw_value=%u", 
                              var_offsets, var_offsets_16, target_var_index, var_offsets_16[target_var_index]);
             } else {
                 absolute_offset = var_offsets[target_var_index];
-                OPTIMIZED_LOG("32-bit offset read: var_offsets=%p, target_var_index=%d, raw_value=%u", 
+                ORF_DEBUG_VERBOSE(utils, "32-bit offset read: var_offsets=%p, target_var_index=%d, raw_value=%u", 
                              var_offsets, target_var_index, var_offsets[target_var_index]);
             }
             char *var_data_ptr = (char *)header + absolute_offset;
-            OPTIMIZED_LOG("optimized_extract_attribute: encoding=%s, target_var_index=%d, absolute_offset=%u, var_data_ptr=%p", 
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: encoding=%s, target_var_index=%d, absolute_offset=%u, var_data_ptr=%p", 
                          (encoding == OFFSET_ENCODING_16BIT) ? "16-bit" : "32-bit",
                          target_var_index, absolute_offset, var_data_ptr);
             
@@ -470,7 +464,7 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
             
             /* Validate varlena structure before returning */
             Size varsize = VARSIZE_ANY(varlena_ptr);
-            OPTIMIZED_LOG("optimized_extract_attribute: varlena_ptr=%p, raw_size=%zu, first_4_bytes=0x%08x", 
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: varlena_ptr=%p, raw_size=%zu, first_4_bytes=0x%08x", 
                          varlena_ptr, varsize, *((uint32*)varlena_ptr));
             
             /* Check for obviously corrupted size */
@@ -486,12 +480,12 @@ optimized_extract_attribute(HeapTuple tuple, int attnum, TupleDesc tupleDesc,
                 ORF_DEBUG_VERBOSE(utils, "PostgreSQL thinks varlena data is compressed! Size=%zu", varsize);
             }
             
-            OPTIMIZED_LOG("optimized_extract_attribute: returning valid varlena data at %p, size=%zu", varlena_ptr, varsize);
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: returning valid varlena data at %p, size=%zu", varlena_ptr, varsize);
             return PointerGetDatum(varlena_ptr);
         }
         else
         {
-            OPTIMIZED_LOG("optimized_extract_attribute: var_index >= var_col_count, returning NULL");
+            ORF_DEBUG_VERBOSE(utils, "optimized_extract_attribute: var_index >= var_col_count, returning NULL");
             *isnull = true;
             return (Datum) NULL;
         }

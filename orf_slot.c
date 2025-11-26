@@ -8,17 +8,12 @@
 
 
 #include "optimized_row_format.h"
+#include "orf_debug.h"
 #include "orf_slot.h"
 #include "orf_utils.h"
 #include "orf_slot_ops.h"
 
-/*
- * Custom logging for optimized row format extension
- * DISABLED for testing - uncomment to enable debugging
- */
-// #define OPTIMIZED_LOG(fmt, ...) \
-//     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
+/* Debug logging uses orf_debug.h macros: ORF_DEBUG_INFO, ORF_DEBUG_VERBOSE */
 
 /*
  * optimized_slot_init_cache
@@ -62,7 +57,7 @@ optimized_slot_init_cache(OptimizedTupleTableSlot *opt_slot)
 	
 	opt_slot->cache_valid = true;
 	
-	OPTIMIZED_LOG("optimized_slot_init_cache: cached header=%p, fixed_data_start=%p, var_offsets=%p, var_col_count=%u",
+	ORF_DEBUG_VERBOSE(slot, "optimized_slot_init_cache: cached header=%p, fixed_data_start=%p, var_offsets=%p, var_col_count=%u",
 		opt_slot->cached_header, opt_slot->fixed_data_start, opt_slot->var_offsets, opt_slot->var_col_count);
 }
 
@@ -155,7 +150,7 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 	OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
 	int attnum;
 
-	OPTIMIZED_LOG("optimized_getsomeattrs: called with natts=%d, current tts_nvalid=%d", 
+	ORF_DEBUG_VERBOSE(slot, "optimized_getsomeattrs: called with natts=%d, current tts_nvalid=%d", 
 	              natts, slot->tts_nvalid);
 
 	/*
@@ -172,7 +167,7 @@ optimized_getsomeattrs(TupleTableSlot *slot, int natts)
 		if (opt_slot->tts_extracted)
 			opt_slot->tts_extracted[0] = true;
 		
-		OPTIMIZED_LOG("optimized_getsomeattrs: used fast path for single column");
+		ORF_DEBUG_VERBOSE(slot, "optimized_getsomeattrs: used fast path for single column");
 		return;
 	}
 

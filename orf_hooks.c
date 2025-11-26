@@ -19,6 +19,10 @@
 
 #include "orf_scan.h"
 
+/* Forward declarations */
+static bool orf_plan_has_aggregate(PlanState *planstate);
+static bool orf_scan_feeds_aggregate(PlanState *scan_planstate, PlanState *root_planstate);
+
 /*
  * Global bitmap registry: Maps relation OID to attribute bitmaps.
  * Populated during ExecutorStart, accessed during scan, cleared at ExecutorEnd.
@@ -43,7 +47,16 @@ typedef struct OrfWalkerContext
 {
     Bitmapset *attrs_used;
     Index scan_relid;
+    bool is_aggregate_context;  /* True if this scan feeds an aggregate operation */
 } OrfWalkerContext;
+
+/*
+ * Context for walking plan trees to find scan nodes.
+ */
+typedef struct OrfPlanWalkerContext
+{
+    PlanState *root_planstate;  /* Root of the entire plan tree */
+} OrfPlanWalkerContext;
 
 /*
  * Initialize the bitmap registry.
@@ -81,9 +94,16 @@ orf_registry_store(Oid relid, Bitmapset *attrs)
 {
     OrfBitmapEntry *entry;
     bool found;
+    MemoryContext oldcontext;
 
     if (bitmap_registry == NULL)
         orf_registry_init();
+
+    /* 
+     * CRITICAL: Switch to registry context before allocating bitmaps.
+     * This ensures bitmaps persist for the entire query execution.
+     */
+    oldcontext = MemoryContextSwitchTo(registry_context);
 
     entry = (OrfBitmapEntry *) hash_search(bitmap_registry,
                                            &relid,
@@ -93,13 +113,18 @@ orf_registry_store(Oid relid, Bitmapset *attrs)
     if (found)
     {
         /* Union with existing bitmap (handles multiple scans on same relation) */
-        entry->attrs_used = bms_union(entry->attrs_used, attrs);
+        Bitmapset *old_bitmap = entry->attrs_used;
+        entry->attrs_used = bms_union(old_bitmap, attrs);
+        /* Free the old bitmap to avoid memory leak */
+        bms_free(old_bitmap);
     }
     else
     {
         /* New entry */
         entry->attrs_used = bms_copy(attrs);
     }
+    
+    MemoryContextSwitchTo(oldcontext);
 }
 
 /*
@@ -160,27 +185,128 @@ orf_expression_walker(Node *node, OrfWalkerContext *context)
     {
         Var *var = (Var *) node;
 
+#if ORF_DEBUG_ENABLED
+        elog(DEBUG1, "ORF DEBUG: Found Var node: varno=%d, varattno=%d, varlevelsup=%d (scan_relid=%d)",
+             var->varno, var->varattno, var->varlevelsup, context->scan_relid);
+#endif
+
         /* Only interested in Vars from the scanned relation */
         if (var->varno == context->scan_relid && var->varlevelsup == 0)
         {
             if (var->varattno == 0)
             {
                 /* Whole-row reference: need all attributes */
+#if ORF_DEBUG_ENABLED
+                elog(DEBUG1, "ORF DEBUG: Whole-row reference detected! Setting attrs_used = NULL");
+#endif
                 context->attrs_used = NULL; /* Signal to use fallback */
                 return true; /* Stop walking */
             }
             else if (var->varattno > 0)
             {
                 /* Regular attribute */
+#if ORF_DEBUG_ENABLED
+                elog(DEBUG1, "ORF DEBUG: Adding attribute %d to bitmap", var->varattno);
+#endif
                 context->attrs_used = bms_add_member(context->attrs_used, var->varattno);
             }
-            /* Negative varattno = system column, handled separately */
+            else
+            {
+#if ORF_DEBUG_ENABLED
+                elog(DEBUG1, "ORF DEBUG: System column (varattno=%d), ignoring", var->varattno);
+#endif
+            }
+        }
+        else
+        {
+#if ORF_DEBUG_ENABLED
+            elog(DEBUG1, "ORF DEBUG: Var from different relation or level, ignoring");
+#endif
         }
         return false;
     }
 
+    /* Log other node types for debugging */
+#if ORF_DEBUG_ENABLED
+    if (IsA(node, TargetEntry))
+    {
+        elog(DEBUG1, "ORF DEBUG: Found TargetEntry node");
+    }
+    else if (IsA(node, OpExpr))
+    {
+        elog(DEBUG1, "ORF DEBUG: Found OpExpr node");
+    }
+    else if (IsA(node, Const))
+    {
+        elog(DEBUG1, "ORF DEBUG: Found Const node");
+    }
+    else
+    {
+        elog(DEBUG1, "ORF DEBUG: Found other node type: %d", (int)nodeTag(node));
+    }
+#endif
+
     /* Recurse for all other node types */
     return expression_tree_walker(node, orf_expression_walker, (void *) context);
+}
+
+/*
+ * Detect if a given scan node is feeding an aggregate operation.
+ * This checks if there's an Agg node anywhere in the plan tree.
+ */
+static bool
+orf_scan_feeds_aggregate(PlanState *scan_planstate, PlanState *root_planstate)
+{
+    /* Check if root plan contains Agg node */
+    if (IsA(root_planstate, AggState))
+    {
+#if ORF_DEBUG_ENABLED
+        elog(DEBUG1, "ORF DEBUG: Root plan is aggregate operation");
+#endif
+        return true;
+    }
+
+    /* Recursively check if any node in the plan tree is Agg */
+    return orf_plan_has_aggregate(root_planstate);
+}
+
+/*
+ * Recursively check if plan tree contains any aggregate operations.
+ */
+static bool
+orf_plan_has_aggregate(PlanState *planstate)
+{
+    ListCell *lc;
+
+    if (planstate == NULL)
+        return false;
+
+    /* Check current node */
+    if (IsA(planstate, AggState))
+    {
+#if ORF_DEBUG_ENABLED
+        elog(DEBUG1, "ORF DEBUG: Found aggregate node in plan tree");
+#endif
+        return true;
+    }
+
+    /* Check left subtree */
+    if (planstate->lefttree && orf_plan_has_aggregate(planstate->lefttree))
+        return true;
+
+    /* Check right subtree */
+    if (planstate->righttree && orf_plan_has_aggregate(planstate->righttree))
+        return true;
+
+    /* Check subplans */
+    foreach(lc, planstate->subPlan)
+    {
+        SubPlanState *sps = (SubPlanState *) lfirst(lc);
+        if (orf_plan_has_aggregate(sps->planstate))
+            return true;
+    }
+
+    return false;
 }
 
 /*
@@ -189,13 +315,17 @@ orf_expression_walker(Node *node, OrfWalkerContext *context)
 static bool
 orf_plan_walker(PlanState *planstate, void *context)
 {
+    OrfPlanWalkerContext *plan_context = (OrfPlanWalkerContext *) context;
     Plan *plan;
     Scan *scan;
     ScanState *ss;
     Relation rel;
     OrfWalkerContext expr_context;
     Oid relid;
+#if ORF_DEBUG_ENABLED
     char *bitmap_str;
+#endif
+    bool is_aggregate_context;
 
     if (planstate == NULL)
         return false;
@@ -219,28 +349,90 @@ orf_plan_walker(PlanState *planstate, void *context)
             expr_context.scan_relid = scan->scanrelid;
             expr_context.attrs_used = NULL;
 
-            /* Walk the target list */
-            orf_expression_walker((Node *) plan->targetlist, &expr_context);
+            /* AGGREGATE DETECTION: Check if this scan feeds an aggregate operation */
+            is_aggregate_context = false;
+            if (plan_context && plan_context->root_planstate)
+            {
+                is_aggregate_context = orf_scan_feeds_aggregate(planstate, plan_context->root_planstate);
+            }
+            expr_context.is_aggregate_context = is_aggregate_context;
 
-            /* Walk the qual */
-            if (expr_context.attrs_used != NULL) /* Not whole-row */
-                orf_expression_walker((Node *) plan->qual, &expr_context);
+            /* DEBUG: Log what we're about to analyze */
+#if ORF_DEBUG_ENABLED
+            elog(DEBUG1, "ORF DEBUG: Analyzing scan on relation '%s' (scanrelid=%d, aggregate_context=%s)",
+                 RelationGetRelationName(rel), scan->scanrelid,
+                 is_aggregate_context ? "true" : "false");
+#endif
+
+            /* Walk the target list (SKIP for aggregate context) */
+            if (is_aggregate_context)
+            {
+#if ORF_DEBUG_ENABLED
+                elog(DEBUG1, "ORF DEBUG: SKIPPING targetlist walk (aggregate context detected)");
+#endif
+            }
+            else
+            {
+#if ORF_DEBUG_ENABLED
+                elog(DEBUG1, "ORF DEBUG: Walking targetlist...");
+#endif
+                orf_expression_walker((Node *) plan->targetlist, &expr_context);
+
+#if ORF_DEBUG_ENABLED
+                if (expr_context.attrs_used != NULL) {
+                    char *bitmap_str = bmsToString(expr_context.attrs_used);
+                    elog(DEBUG1, "ORF DEBUG: After targetlist: attrs_used = %s", bitmap_str);
+                    pfree(bitmap_str);
+                } else {
+                    elog(DEBUG1, "ORF DEBUG: After targetlist: attrs_used = NULL (whole-row or empty)");
+                }
+#endif
+            }
+
+            /* Walk the qual (ALWAYS process quals for filtering) */
+#if ORF_DEBUG_ENABLED
+            elog(DEBUG1, "ORF DEBUG: Walking qual...");
+#endif
+            orf_expression_walker((Node *) plan->qual, &expr_context);
+
+#if ORF_DEBUG_ENABLED
+            if (expr_context.attrs_used != NULL) {
+                char *bitmap_str = bmsToString(expr_context.attrs_used);
+                elog(DEBUG1, "ORF DEBUG: After qual: attrs_used = %s", bitmap_str);
+                pfree(bitmap_str);
+            } else {
+                elog(DEBUG1, "ORF DEBUG: After qual: attrs_used = NULL (no qual attributes or whole-row)");
+            }
+#endif
 
             /* Store in registry */
             if (expr_context.attrs_used != NULL)
             {
+                /* 
+                 * CRITICAL: Copy the bitmap to registry FIRST, then use the registry's copy
+                 * for logging. The expr_context.attrs_used might be in a temporary memory
+                 * context that could be freed.
+                 */
                 orf_registry_store(relid, expr_context.attrs_used);
-
-                /* Debug logging */
-                bitmap_str = bmsToString(expr_context.attrs_used);
-                elog(LOG, "ORF: Scan on '%s' (OID %u) needs attributes: %s",
-                     RelationGetRelationName(rel), relid, bitmap_str);
-                pfree(bitmap_str);
+                
+#if ORF_DEBUG_ENABLED
+                /* Get the stored bitmap from registry for logging */
+                Bitmapset *stored_bitmap = orf_registry_lookup(relid);
+                if (stored_bitmap)
+                {
+                    bitmap_str = bmsToString(stored_bitmap);
+                    elog(LOG, "ORF: Scan on '%s' (OID %u) needs attributes: %s",
+                         RelationGetRelationName(rel), relid, bitmap_str);
+                    pfree(bitmap_str);
+                }
+#endif
             }
             else
             {
+#if ORF_DEBUG_ENABLED
                 elog(LOG, "ORF: Scan on '%s' (OID %u) needs all attributes (whole-row reference)",
                      RelationGetRelationName(rel), relid);
+#endif
             }
         }
     }
@@ -263,7 +455,11 @@ orf_executor_start(QueryDesc *queryDesc, int eflags)
 
     /* Walk the plan tree to find optimized scans and build bitmaps */
     if (queryDesc->planstate)
-        orf_plan_walker(queryDesc->planstate, NULL);
+    {
+        OrfPlanWalkerContext plan_context;
+        plan_context.root_planstate = queryDesc->planstate;
+        orf_plan_walker(queryDesc->planstate, &plan_context);
+    }
 }
 
 /*

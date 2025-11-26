@@ -16,13 +16,7 @@
 #include "orf_slot_ops.h"
 #include "orf_scan.h"
 
-/*
- * Custom logging for optimized row format extension
- * DISABLED for testing - uncomment to enable debugging
- */
-// #define OPTIMIZED_LOG(fmt, ...) \
-//     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
+/* Debug logging uses orf_debug.h macros: ORF_DEBUG_INFO, ORF_DEBUG_VERBOSE */
 
 /* Get the heap AM routine to delegate operations to */
 static const TableAmRoutine *
@@ -60,7 +54,7 @@ optimized_scan_begin(Relation rel, Snapshot snapshot,
     if (rel->rd_amcache == NULL)
     {
         rel->rd_amcache = build_column_cache(tupleDesc);
-        OPTIMIZED_LOG("optimized_scan_begin: built new cache for relation %s",
+        ORF_DEBUG_INFO(scan, "optimized_scan_begin: built new cache for relation %s",
                      RelationGetRelationName(rel));
     }
     oscan->column_cache = (OptimizedColumnMapCache *) rel->rd_amcache;
@@ -167,17 +161,20 @@ optimized_scan_getnextslot(TableScanDesc scan, ScanDirection direction,
                         OptimizedTupleTableSlot *opt_slot = (OptimizedTupleTableSlot *) slot;
                         Oid relid = RelationGetRelid(oscan->rel);
 
-                        /* Look up the attribute bitmap from the registry */
+                        /* 
+                         * Look up the attribute bitmap from the registry.
+                         * The registry owns the bitmap and keeps it valid for the query duration.
+                         */
                         opt_slot->attrs_used = orf_registry_lookup(relid);
 
                         /* DEBUG: Check if bitmap was found (using debug logging system) */
                         #if ORF_DEBUG_ENABLED && ORF_DEBUG_SCAN
                         if (opt_slot->attrs_used) {
                             char *bitmap_str = bmsToString(opt_slot->attrs_used);
-                            elog(NOTICE, "ORF_DEBUG[SCAN]: Retrieved bitmap for relation %u: %s", relid, bitmap_str);
+                            ORF_DEBUG_INFO(scan, "Retrieved bitmap for relation %u: %s", relid, bitmap_str);
                             pfree(bitmap_str);
                         } else {
-                            elog(NOTICE, "ORF_DEBUG[SCAN]: No bitmap found for relation %u", relid);
+                            ORF_DEBUG_INFO(scan, "No bitmap found for relation %u", relid);
                         }
                         #endif
 

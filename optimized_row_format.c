@@ -18,12 +18,8 @@ PG_MODULE_MAGIC;
 
 /*
  * Custom logging for optimized row format extension
- * This allows us to control logging independently of PostgreSQL's general debug level
- * DISABLED for testing - uncomment to enable debugging
+ * Debug logging uses orf_debug.h macros: ORF_DEBUG_INFO, ORF_DEBUG_VERBOSE
  */
-// #define OPTIMIZED_LOG(fmt, ...) \
-//     elog(NOTICE, "OPTIMIZED_DEBUG: " fmt, ##__VA_ARGS__)
-#define OPTIMIZED_LOG(fmt, ...) do { } while (0)
 
 
 /* Forward declarations */
