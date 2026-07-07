@@ -2,6 +2,12 @@
 
 This directory contains comprehensive testing tools to validate the performance characteristics of the optimized row format compared to PostgreSQL's standard heap format.
 
+> **How to read these numbers:** these benchmarks measure **CPU / cache** behavior, **not disk I/O**.
+> ORF is a CPU-layer optimization — it does not reduce the number of pages read, and its larger tuples
+> (from the offset array) can *increase* I/O. The SELECT/INSERT/storage results below should be
+> interpreted in that light. See the **"What This Optimizes — and What It Does NOT"** section in the
+> top-level [`README.md`](../README.md) before drawing conclusions.
+
 ## Working Test Files
 
 ### 1. `performance.sql` - Comprehensive Performance Suite ✅
