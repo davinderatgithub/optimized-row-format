@@ -10,6 +10,45 @@ The optimized storage format reorganizes table data to improve performance by:
 - Using an array of offsets for variable-length columns
 - Minimizing padding and alignment overhead
 
+## What This Optimizes — and What It Does NOT (read this first)
+
+> **This is a CPU / cache-layer optimization, not a disk-I/O or storage-size optimization.**
+> The "O(1) column access" claim is easy to misread as an I/O saving. It is not. Please read
+> this section before drawing any performance conclusions.
+
+- PostgreSQL reads data in whole **8 KB pages**. In a row store, every column of a row lives on
+  the same page, so reading *any* column pulls the *entire* row's page into the buffer pool. This
+  holds no matter how few columns a query projects, and it holds for both OS-buffered I/O and
+  direct I/O. **This layout does not change how many pages are read → it saves no I/O.**
+- Disk **seeks / IOPS occur only when fetching pages** into memory. Column extraction ("deform")
+  happens entirely in RAM on an already-resident page. Skipping columns therefore saves **no seeks
+  and no I/O** — it saves only the **CPU** cost of decoding raw bytes into `Datum`/`isnull` values,
+  plus some CPU-cache locality.
+- Because the variable-length **offset array adds bytes to every tuple**, ORF tuples are *larger*
+  than heap tuples (see the storage-overhead numbers in `test/README.md`). Fewer tuples per page →
+  **more** pages → if anything, **more** I/O on a large scan. At the I/O layer this is a trade-off,
+  not a win.
+
+**Where the benefit actually is:** the CPU cost of tuple deformation on **wide tables** with
+**sparse projections** during a **warm (in-memory), CPU-bound** scan — reaching a "late" column in
+O(1) instead of walking every preceding variable-length column. Even this gain is bounded, and in
+this project's own measurements the custom-slot machinery frequently outweighed it for narrow
+queries (see `test/README.md`).
+
+**If the goal is to reduce I/O for narrow projections,** the correct approach is columnar / PAX
+storage or column families (physically separating columns across pages) — **not** a within-row
+rearrangement like this one.
+
+### Theoretical basis
+
+This layout is the "consolidated" tuple representation described in **Gray & Reuter,
+*Transaction Processing: Concepts and Techniques*, §14.3.2.5 (Fig. 14.10)**: fixed-length fields
+first (offsets compiled from the catalog), a pointer/offset array for the variable-length fields
+only, then the variable-length data, with NULLs tracked by a bitmap (§14.3.3.1). PostgreSQL's own
+heap is closer to their §14.3.2.2 (length-prefixed variable fields). That a record-layout change is
+a **cache/CPU** optimization with **identical I/O** is established empirically by the PAX paper
+(see [References](#references)).
+
 ## Project Directory Structure
 
 ```
@@ -188,6 +227,14 @@ The optimized storage format introduces several improvements to the current Post
    - Supports all data types
 
 ### References
+
+**Foundational (tuple layout and the CPU-vs-I/O distinction):**
+
+- Gray, J. & Reuter, A. *Transaction Processing: Concepts and Techniques*, Morgan Kaufmann, 1992 — §14.3.2.5 (the consolidated fixed-front / variable-back tuple layout with an offset array, Fig. 14.10) and §14.3.3.1 (NULL bitmap). This is the exact scheme implemented here.
+- Ailamaki, DeWitt, Hill & Skounakis. [*Weaving Relations for Cache Performance* (PAX), VLDB 2001](https://research.cs.wisc.edu/multifacet/papers/vldb01_pax.pdf) — demonstrates that a record-layout change is a **cache/CPU** optimization with **identical I/O**; explains why this class of technique does not reduce disk I/O.
+- Hellerstein, Stonebraker & Hamilton. [*Architecture of a Database System*, Foundations and Trends in Databases, 2007](https://dsf.berkeley.edu/papers/fntdb07-architecture.pdf) — storage management and record representation.
+
+**PostgreSQL:**
 
 - [PostgreSQL Official Documentation: Database Page Layout](https://www.postgresql.org/docs/current/storage-page-layout.html)
 - [PostgreSQL Official Documentation: Storage File Layout](https://www.postgresql.org/docs/current/storage-file-layout.html)
